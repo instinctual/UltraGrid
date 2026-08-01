@@ -5,22 +5,24 @@ Last updated: 2026-08-01 (America/Los_Angeles)
 ## Repository state
 
 - Current checkout: `/home/administrator/UltraGrid`
-- Current branch: `decklinkscheduling`
+- Current branch: `master`
 - Latest implementation commit: `e907a7ecb` — Recover DeckLink format
   detection after signal loss
 - Organization remote: `instinctual` (`https://github.com/instinctual/UltraGrid.git`)
 - Upstream remote: `origin` (`https://github.com/CESNET/UltraGrid.git`)
-- `decklinkscheduling` is pushed to `instinctual/decklinkscheduling`.
-- The branch is merged into `instinctual/master`.
+- Local `master` tracks `instinctual/master`.
+- The completed `decklinkscheduling` and `r12l-identity-hevc` branches were
+  fully merged and deleted locally and from the `instinctual` remote.
 - Current local binary SHA-256:
   `7f9097fbfb9b1ebd6220823f0d8503a377bc6881c22aac225c83e4da0c34604e`
 
-Recent branch commits:
+Recent commits:
 
-1. `e907a7ecb` — Recover DeckLink format detection after signal loss
-2. `5d3032b2e` — Reduce Vulkan handoff overhead
-3. `60a4e955b` — Optimize DeckLink decode scheduling
-4. `a188eaace` — Optimize DeckLink buffer handoff
+1. `b155a959b` — Document DeckLink streaming handoff
+2. `e907a7ecb` — Recover DeckLink format detection after signal loss
+3. `5d3032b2e` — Reduce Vulkan handoff overhead
+4. `60a4e955b` — Optimize DeckLink decode scheduling
+5. `a188eaace` — Optimize DeckLink buffer handoff
 
 ## Machines
 
@@ -34,6 +36,12 @@ through the operator or the normal secret-management mechanism.
 
 Both runtime services are transient systemd units created with `systemd-run`.
 They use `Restart=on-failure` and `RestartSec=1s`.
+
+Both machines currently run the watchdog build at
+`/usr/local/bin/uv-r12l-identity`. Its SHA-256 matches the local binary:
+`7f9097fbfb9b1ebd6220823f0d8503a377bc6881c22aac225c83e4da0c34604e`.
+The previously installed binary was retained on each machine as
+`/tmp/uv-r12l-identity.pre-watchdog` for short-term rollback.
 
 ## Signal and codec path
 
@@ -116,27 +124,49 @@ frames, and audio underflow. Depth 3 is the stable floor on this hardware.
 - Compact cumulative DeckLink counters report late, dropped, flushed,
   repeated, dismissed, schedule-failure, and audio-underflow events.
 - A no-signal watchdog re-arms DeckLink format detection after two seconds of
-  continuous signal loss, with bounded retry backoff. Recovery runs from the
-  capture thread rather than the DeckLink callback.
+  continuous signal loss. Recovery runs from the capture thread rather than
+  the DeckLink callback.
+  - It stops the stream, disables video input, re-enables the last mode with
+    `bmdVideoInputEnableFormatDetection`, and starts the stream.
+  - Retries back off at 5, 10, 20, then 30 seconds during sustained loss.
+  - Any valid frame resets the watchdog and its backoff.
+  - State is tracked independently per DeckLink device.
 
 No optimization above adds a frame queue or increases scheduled depth.
 
 ## Last measured steady state
 
-After a clean restart of both machines on commit `5d3032b2e`:
+After deploying the watchdog build and restarting both runtime units:
 
 - Encoder capture: approximately 24 fps.
-- Encoder encode path: approximately 16.0 ms total.
-  - R12L conversion: approximately 7.0 ms.
-  - VA encoder submit/output: approximately 9.0 ms.
+- Encoder encode path: approximately 15.9–17.0 ms total.
+  - R12L conversion: approximately 6.8–6.9 ms.
+  - VA encoder submit/output: approximately 9.0–10.2 ms.
 - Receiver output: approximately 24 fps.
-- Receiver decode path: approximately 10.3–10.4 ms.
-  - QSV packet submit: approximately 6.2 ms.
-  - Surface transfer/conversion: approximately 4.1 ms.
+- Receiver decode path: approximately 10–11 ms.
 - Steady receiver counters: 0 late, 0 dropped, 0 schedule failures.
 
 Counter increases during a deliberate sender restart are expected. Confirm
 that counters become flat after the stream recovers.
+
+## Signal-loss and format-change validation
+
+The deployed build was exercised with repeated SDI interruptions, SDI format
+changes, and a reboot of the machine producing the signal:
+
+- UHD 2160p24 RGB 12-bit R12L and 525i59.94 YCbCr 10-bit v210 both
+  reconfigured end-to-end without restarting UltraGrid.
+- During the producer reboot, DeckLink briefly detected 1080i59.94 and then
+  switched to the final 2160p24 R12L signal. Normal format callbacks arrived,
+  so the watchdog correctly did not cycle the input.
+- The original failure mode was a persistent old-mode stream whose frames all
+  carried `bmdFrameHasNoInputSource`, with no format-change callback after the
+  source returned. The watchdog specifically targets this condition.
+- Short or intermittent losses do not trigger the watchdog unless no valid
+  frame is received continuously for two seconds.
+- Format transitions can temporarily add repeated/dismissed frames and audio
+  underflows. In successful tests these counters became flat after recovery,
+  while late, dropped, and schedule-failure counters remained zero.
 
 ## Important rejected experiments
 
@@ -198,26 +228,8 @@ sha256sum bin/uv
 Do not place passwords directly in this document, shell history, commits, or
 service command lines.
 
-## Moving the checkout
+## Checkout location
 
-To move the complete repository while preserving `.git` and all local state:
-
-```bash
-mv /home/administrator/ccgscx/UltraGrid /home/administrator/UltraGrid
-cd /home/administrator/UltraGrid
-```
-
-Then resume the existing Codex conversation from the new directory. After the
-move:
-
-```bash
-make clean
-./autogen.sh
-./configure
-make -j"$(nproc)"
-make check
-```
-
-Only run the full regeneration sequence if required by the moved build tree;
-otherwise a normal `make` may be sufficient. Search for stale absolute paths
-if a build tool reports the old checkout location.
+The repository move to `/home/administrator/UltraGrid` is complete. A normal
+incremental build and the full test suite passed from this location; no
+autotools regeneration was required.
