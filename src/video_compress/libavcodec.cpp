@@ -321,6 +321,9 @@ struct state_video_compress_libav {
                   INT_MAX); ///< number of threads used for UG conversions
 
         double    mov_avg_comp_duration = 0;
+        double    mov_avg_convert_duration = 0;
+        double    mov_avg_upload_duration = 0;
+        double    mov_avg_encode_duration = 0;
         long      mov_avg_frames        = 0;
         time_ns_t duration_warn_last_print = 0;
         int64_t   max_pts_diff_reported    = 0;
@@ -1441,14 +1444,29 @@ static bool configure_with(struct state_video_compress_libav *s, struct video_de
 }
 
 /// print hint to improve performance if not making it
-static void check_duration(struct state_video_compress_libav *s, time_ns_t dur_pixfmt_change_ns, time_ns_t dur_total_ns)
+static void
+check_duration(struct state_video_compress_libav *s,
+               time_ns_t dur_pixfmt_change_ns, time_ns_t dur_upload_ns,
+               time_ns_t dur_encode_ns, time_ns_t dur_total_ns)
 {
         enum { REPEAT_INT_SEC = 30 };
         constexpr int mov_window = 100;
         double duration = NS_TO_SEC_DBL(dur_total_ns);
         s->mov_avg_comp_duration = (s->mov_avg_comp_duration * (mov_window - 1) + duration) / mov_window;
+        s->mov_avg_convert_duration =
+            (s->mov_avg_convert_duration * (mov_window - 1) +
+             NS_TO_SEC_DBL(dur_pixfmt_change_ns)) /
+            mov_window;
+        s->mov_avg_upload_duration =
+            (s->mov_avg_upload_duration * (mov_window - 1) +
+             NS_TO_SEC_DBL(dur_upload_ns)) /
+            mov_window;
+        s->mov_avg_encode_duration =
+            (s->mov_avg_encode_duration * (mov_window - 1) +
+             NS_TO_SEC_DBL(dur_encode_ns)) /
+            mov_window;
         s->mov_avg_frames += 1;
-        if (s->mov_avg_frames < 2 * mov_window || s->mov_avg_comp_duration < 1 / s->compressed_desc.fps) {
+        if (s->mov_avg_frames < 2 * mov_window) {
                 return;
         }
         const time_ns_t now = get_time_in_ns();
@@ -1456,8 +1474,22 @@ static void check_duration(struct state_video_compress_libav *s, time_ns_t dur_p
                 return;
         }
         s->duration_warn_last_print = now;
-        log_msg(LOG_LEVEL_WARNING, MOD_NAME "Average compression time of last %d frames is %f ms but time per frame is only %f ms!\n",
-                        mov_window, s->mov_avg_comp_duration * 1000, 1000 / s->compressed_desc.fps);
+        const double frame_period = 1 / s->compressed_desc.fps;
+        const bool over_budget = s->mov_avg_comp_duration >= frame_period;
+        log_msg(over_budget ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO,
+                MOD_NAME
+                "Average encode path time of last %d frames is %.2f ms "
+                "(R12L conversion %.2f ms + surface upload %.2f ms + "
+                "encoder submit/output %.2f ms)%s %.2f ms per frame.\n",
+                mov_window, s->mov_avg_comp_duration * 1000,
+                s->mov_avg_convert_duration * 1000,
+                s->mov_avg_upload_duration * 1000,
+                s->mov_avg_encode_duration * 1000,
+                over_budget ? ", which exceeds" : "; budget is",
+                frame_period * 1000);
+        if (!over_budget) {
+                return;
+        }
         string hint;
         string quality_hurt = "latency";
         if (regex_match(s->codec_ctx->codec->name, regex(".*nvenc.*"))) {
@@ -1762,7 +1794,7 @@ static shared_ptr<video_frame> libavcodec_compress_tile(void *state, shared_ptr<
                 << NS_TO_SEC_DBL(t1 - t0) <<
                 " s, dump+swscale " << (t2 - t1) / (double) NS_IN_SEC <<
                 " s, compression " << (t3 - t2) / (double) NS_IN_SEC << " s\n";
-        check_duration(s, t1 - t0, t3 - t0);
+        check_duration(s, t1 - t0, t2 - t1, t3 - t2, t3 - t0);
 
         if (!out) {
                 return {};

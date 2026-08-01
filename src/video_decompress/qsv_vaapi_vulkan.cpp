@@ -388,9 +388,18 @@ struct converter {
                 allocation.pNext = &import;
                 allocation.allocationSize = requirements.size;
                 allocation.memoryTypeIndex = type;
-                if (!vk_ok(vkAllocateMemory(device, &allocation, nullptr,
-                                             &input_memory)) ||
-                    !vk_ok(vkBindImageMemory(device, input, input_memory, 0))) {
+                VkResult allocate_result = vkAllocateMemory(
+                    device, &allocation, nullptr, &input_memory);
+                if (!vk_ok(allocate_result)) {
+                        close(import.fd);
+                        vkDestroyImage(device, input, nullptr);
+                        input = {};
+                        close_fds();
+                        return fail("Vulkan cannot import Y410 DMA-BUF");
+                }
+                if (!vk_ok(vkBindImageMemory(device, input,
+                                             input_memory, 0))) {
+                        destroy_input();
                         close_fds();
                         return fail("Vulkan cannot import Y410 DMA-BUF");
                 }
@@ -404,8 +413,16 @@ struct converter {
                 view.subresourceRange.levelCount = 1;
                 view.subresourceRange.layerCount = 1;
                 if (!vk_ok(vkCreateImageView(device, &view, nullptr,
-                                              &input_view)))
+                                              &input_view))) {
+                        destroy_input();
                         return fail("Cannot create imported Y410 image view");
+                }
+                update_descriptor();
+                return true;
+        }
+
+        void update_descriptor()
+        {
                 VkDescriptorImageInfo image_descriptor{};
                 image_descriptor.imageView = input_view;
                 image_descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -427,7 +444,6 @@ struct converter {
                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 writes[1].pBufferInfo = &buffer_descriptor;
                 vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-                return true;
         }
 
         bool convert(VASurfaceID surface, unsigned char *destination,
