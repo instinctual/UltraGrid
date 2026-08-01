@@ -235,6 +235,12 @@ struct device_state {
         unique_ptr<VideoDelegate>  delegate;
         IDeckLinkConfiguration     *deckLinkConfiguration = nullptr;
         BMDNotificationCallback    *notificationCallback  = nullptr;
+        BMDDisplayMode              currentDisplayMode     = bmdModeUnknown;
+        BMDPixelFormat              currentPixelFormat     = bmdFormatUnspecified;
+        bool                        no_signal               = false;
+        steady_clock::time_point    no_signal_since{};
+        steady_clock::time_point    next_no_signal_recovery{};
+        unsigned int                no_signal_recovery_backoff = 5;
         string                      device_id = "0"; // either numeric value or device name
         bool                        audio                 = false; /* whether we process audio or not */
         struct tile                *tile                  = nullptr;
@@ -424,6 +430,8 @@ VideoDelegate::VideoInputFormatChanged(
         CALL_AND_CHECK(deckLinkInput->EnableVideoInput(mode->GetDisplayMode(),
                                                        pf, s->enable_flags),
                        "EnableVideoInput");
+        device.currentDisplayMode = mode->GetDisplayMode();
+        device.currentPixelFormat = pf;
         deckLinkInput->FlushStreams();
         deckLinkInput->StartStreams();
 
@@ -447,9 +455,16 @@ VideoDelegate::VideoInputFrameArrived (IDeckLinkVideoInputFrame *videoFrame, IDe
 	{
                 if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
                         nosig = true;
+                        if (!device.no_signal) {
+                                device.no_signal = true;
+                                device.no_signal_since = steady_clock::now();
+                        }
 			log_msg(LOG_LEVEL_INFO, "Frame received (#%d) - No input signal detected\n", s->frames);
                         newFrameReady = s->nosig_send ? 1 : -1;
                 } else {
+                        device.no_signal = false;
+                        device.next_no_signal_recovery = {};
+                        device.no_signal_recovery_backoff = 5;
                         newFrameReady = 1; // The new frame is ready to grab
 			// printf("Frame received (#%lu) - Valid Frame (Size: %li bytes)\n", framecount, videoFrame->GetRowBytes() * videoFrame->GetHeight());
 		}
@@ -1451,6 +1466,8 @@ bool device_state::init(struct vidcap_decklink_state *s, struct tile *t, BMDAudi
                 }
                 INIT_ERR();
         }
+        currentDisplayMode = displayMode->GetDisplayMode();
+        currentPixelFormat = pf;
 
         if (!audio) { //TODO: figure out output from multiple streams
                 deckLinkInput->DisableAudioInput();
@@ -1795,6 +1812,98 @@ dispose_decklink_accessed_frame(struct video_frame *frame)
         vf_free(frame);
 }
 
+/**
+ * DeckLink may keep producing old-mode frames flagged with
+ * bmdFrameHasNoInputSource after an interrupted source returns in a different
+ * format, without delivering VideoInputFormatChanged. Re-enable the current
+ * input mode with format detection armed to force the driver to probe again.
+ *
+ * This runs on the capture/grab thread, never from the DeckLink callback.
+ */
+static void
+recover_decklink_no_signal(struct vidcap_decklink_state *s)
+{
+        constexpr auto recovery_threshold = std::chrono::seconds(2);
+        constexpr unsigned int max_backoff_seconds = 30;
+        struct recovery_request {
+                int device_index;
+                BMDDisplayMode display_mode;
+                BMDPixelFormat pixel_format;
+                BMDVideoInputFlags enable_flags;
+        };
+        vector<recovery_request> recovery_requests;
+        const auto now = steady_clock::now();
+
+        {
+                unique_lock<mutex> lk(s->lock);
+                for (int i = 0; i < s->devices_cnt; ++i) {
+                        auto &device = s->state[i];
+                        if (!device.no_signal ||
+                            now - device.no_signal_since < recovery_threshold ||
+                            (device.next_no_signal_recovery !=
+                                 steady_clock::time_point{} &&
+                             now < device.next_no_signal_recovery)) {
+                                continue;
+                        }
+                        recovery_requests.push_back(
+                            { i, device.currentDisplayMode,
+                              device.currentPixelFormat,
+                              (BMDVideoInputFlags)(
+                                  s->enable_flags |
+                                  bmdVideoInputEnableFormatDetection) });
+                        device.next_no_signal_recovery =
+                            now + std::chrono::seconds(
+                                      device.no_signal_recovery_backoff);
+                        device.no_signal_recovery_backoff =
+                            min(device.no_signal_recovery_backoff * 2,
+                                max_backoff_seconds);
+                }
+        }
+
+        for (const auto &request : recovery_requests) {
+                auto &device = s->state[request.device_index];
+                LOG(LOG_LEVEL_WARNING)
+                    << MOD_NAME
+                    << "No input signal for 2 seconds; re-arming DeckLink "
+                       "format detection on device "
+                    << device.device_id << ".\n";
+
+                HRESULT result = device.deckLinkInput->StopStreams();
+                if (FAILED(result)) {
+                        LOG(LOG_LEVEL_WARNING)
+                            << MOD_NAME << "No-signal recovery StopStreams: "
+                            << bmd_hresult_to_string(result) << "\n";
+                }
+                result = device.deckLinkInput->DisableVideoInput();
+                if (FAILED(result)) {
+                        LOG(LOG_LEVEL_WARNING)
+                            << MOD_NAME
+                            << "No-signal recovery DisableVideoInput: "
+                            << bmd_hresult_to_string(result) << "\n";
+                }
+                result = device.deckLinkInput->EnableVideoInput(
+                    request.display_mode, request.pixel_format,
+                    request.enable_flags);
+                if (FAILED(result)) {
+                        LOG(LOG_LEVEL_ERROR)
+                            << MOD_NAME
+                            << "No-signal recovery EnableVideoInput: "
+                            << bmd_hresult_to_string(result) << "\n";
+                        continue;
+                }
+                result = device.deckLinkInput->StartStreams();
+                if (FAILED(result)) {
+                        LOG(LOG_LEVEL_ERROR)
+                            << MOD_NAME << "No-signal recovery StartStreams: "
+                            << bmd_hresult_to_string(result) << "\n";
+                } else {
+                        LOG(LOG_LEVEL_NOTICE)
+                            << MOD_NAME
+                            << "DeckLink format detection re-armed.\n";
+                }
+        }
+}
+
 static struct video_frame *
 vidcap_decklink_grab(void *state, struct audio_frame **audio)
 {
@@ -1804,6 +1913,8 @@ vidcap_decklink_grab(void *state, struct audio_frame **audio)
         bool				frame_ready = true;
 	
 	int timeout = 0;
+
+        recover_decklink_no_signal(s);
 
 	unique_lock<mutex> lk(s->lock);
 // LOCK - LOCK - LOCK - LOCK - LOCK - LOCK - LOCK - LOCK - LOCK - LOCK - LOCK //
