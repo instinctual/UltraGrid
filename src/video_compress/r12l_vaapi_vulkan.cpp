@@ -36,6 +36,7 @@ struct r12l_vaapi_vulkan::impl {
         VkQueue queue{};
         VkCommandPool command_pool{};
         VkCommandBuffer command{};
+        VkFence conversion_fence{};
 
         VkBuffer input{};
         VkDeviceMemory input_memory{};
@@ -105,6 +106,8 @@ struct r12l_vaapi_vulkan::impl {
                 if (input_memory) vkFreeMemory(device, input_memory, nullptr);
                 if (command_pool)
                         vkDestroyCommandPool(device, command_pool, nullptr);
+                if (conversion_fence)
+                        vkDestroyFence(device, conversion_fence, nullptr);
                 if (device) vkDestroyDevice(device, nullptr);
                 if (instance) vkDestroyInstance(instance, nullptr);
         }
@@ -414,6 +417,10 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
         if (!vk_ok(vkAllocateCommandBuffers(m->device, &command_info,
                                              &m->command)))
                 return m->fail("Cannot allocate Vulkan command buffer");
+        VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (!vk_ok(vkCreateFence(m->device, &fence_info, nullptr,
+                                 &m->conversion_fence)))
+                return m->fail("Cannot create Vulkan conversion fence");
         return true;
 }
 
@@ -490,8 +497,11 @@ r12l_vaapi_vulkan::convert(const unsigned char *source,
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &m->command;
-        if (!vk_ok(vkQueueSubmit(m->queue, 1, &submit, {})) ||
-            !vk_ok(vkQueueWaitIdle(m->queue)))
+        if (!vk_ok(vkResetFences(m->device, 1, &m->conversion_fence)) ||
+            !vk_ok(vkQueueSubmit(m->queue, 1, &submit,
+                                 m->conversion_fence)) ||
+            !vk_ok(vkWaitForFences(m->device, 1, &m->conversion_fence,
+                                   VK_TRUE, UINT64_MAX)))
                 return m->fail("Vulkan conversion submission failed");
         m->output_initialized = true;
         return true;

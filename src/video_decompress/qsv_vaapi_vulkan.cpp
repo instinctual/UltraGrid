@@ -465,7 +465,6 @@ struct converter {
                     });
                 if (cached != imported_surfaces.end()) {
                         current_surface = &*cached;
-                        update_descriptor();
                         return true;
                 }
                 VADRMPRIMESurfaceDescriptor desc{};
@@ -580,7 +579,6 @@ struct converter {
                 }
                 imported_surfaces.push_back(item);
                 current_surface = &imported_surfaces.back();
-                update_descriptor();
                 return true;
         }
 
@@ -618,8 +616,8 @@ struct converter {
                 if (destination_stride ==
                     static_cast<size_t>(width) * 4U) {
                         direct = direct_buffer(destination);
-                        update_descriptor(direct);
                 }
+                update_descriptor(direct);
                 last_direct_output = direct != VK_NULL_HANDLE;
                 vkResetCommandBuffer(command, 0);
                 VkCommandBufferBeginInfo begin{
