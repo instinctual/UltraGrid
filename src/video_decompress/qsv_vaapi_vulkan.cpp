@@ -36,6 +36,7 @@ struct converter {
         VkQueue queue{};
         VkCommandPool command_pool{};
         VkCommandBuffer command{};
+        VkFence conversion_fence{};
 
         VkBuffer output{};
         VkDeviceMemory output_memory{};
@@ -59,9 +60,14 @@ struct converter {
         VkPipelineLayout pipeline_layout{};
         VkPipeline pipeline{};
 
-        VkImage input{};
-        VkDeviceMemory input_memory{};
-        VkImageView input_view{};
+        struct imported_surface {
+                VASurfaceID id{VA_INVALID_SURFACE};
+                VkImage image{};
+                VkDeviceMemory memory{};
+                VkImageView view{};
+        };
+        std::vector<imported_surface> imported_surfaces;
+        imported_surface *current_surface{};
 
         bool fail(const char *message)
         {
@@ -86,17 +92,18 @@ struct converter {
                 return UINT32_MAX;
         }
 
-        void destroy_input()
+        void destroy_inputs()
         {
-                if (input_view)
-                        vkDestroyImageView(device, input_view, nullptr);
-                if (input)
-                        vkDestroyImage(device, input, nullptr);
-                if (input_memory)
-                        vkFreeMemory(device, input_memory, nullptr);
-                input_view = {};
-                input = {};
-                input_memory = {};
+                for (auto &item : imported_surfaces) {
+                        if (item.view)
+                                vkDestroyImageView(device, item.view, nullptr);
+                        if (item.image)
+                                vkDestroyImage(device, item.image, nullptr);
+                        if (item.memory)
+                                vkFreeMemory(device, item.memory, nullptr);
+                }
+                imported_surfaces.clear();
+                current_surface = nullptr;
         }
 
         void destroy_direct_outputs()
@@ -114,7 +121,7 @@ struct converter {
         {
                 if (device)
                         vkDeviceWaitIdle(device);
-                destroy_input();
+                destroy_inputs();
                 destroy_direct_outputs();
                 if (pipeline)
                         vkDestroyPipeline(device, pipeline, nullptr);
@@ -135,6 +142,8 @@ struct converter {
                         vkFreeMemory(device, output_memory, nullptr);
                 if (command_pool)
                         vkDestroyCommandPool(device, command_pool, nullptr);
+                if (conversion_fence)
+                        vkDestroyFence(device, conversion_fence, nullptr);
                 if (device)
                         vkDestroyDevice(device, nullptr);
                 if (instance)
@@ -363,6 +372,11 @@ struct converter {
                 if (!vk_ok(vkAllocateCommandBuffers(device, &command_info,
                                                      &command)))
                         return fail("Cannot allocate Vulkan command buffer");
+                VkFenceCreateInfo fence_info{
+                    VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                if (!vk_ok(vkCreateFence(device, &fence_info, nullptr,
+                                         &conversion_fence)))
+                        return fail("Cannot create Vulkan conversion fence");
                 return true;
         }
 
@@ -442,9 +456,18 @@ struct converter {
 
         bool import_surface(VASurfaceID surface)
         {
-                destroy_input();
                 if (vaSyncSurface(va_display, surface) != VA_STATUS_SUCCESS)
                         return fail("vaSyncSurface failed");
+                auto cached = std::find_if(
+                    imported_surfaces.begin(), imported_surfaces.end(),
+                    [surface](const imported_surface &item) {
+                            return item.id == surface;
+                    });
+                if (cached != imported_surfaces.end()) {
+                        current_surface = &*cached;
+                        update_descriptor();
+                        return true;
+                }
                 VADRMPRIMESurfaceDescriptor desc{};
                 VAStatus va_status = vaExportSurfaceHandle(
                     va_display, surface,
@@ -493,13 +516,16 @@ struct converter {
                 image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT;
                 image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
                 image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                imported_surface item{};
+                item.id = surface;
                 if (!vk_ok(vkCreateImage(device, &image_info, nullptr,
-                                         &input))) {
+                                         &item.image))) {
                         close_fds();
                         return fail("Vulkan cannot create imported Y410 image");
                 }
                 VkMemoryRequirements requirements{};
-                vkGetImageMemoryRequirements(device, input, &requirements);
+                vkGetImageMemoryRequirements(device, item.image,
+                                             &requirements);
                 uint32_t type = memory_type(
                     requirements.memoryTypeBits,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -509,7 +535,7 @@ struct converter {
                 }
                 VkMemoryDedicatedAllocateInfo dedicated{
                     VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-                dedicated.image = input;
+                dedicated.image = item.image;
                 VkImportMemoryFdInfoKHR import{
                     VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
                 import.pNext = &dedicated;
@@ -523,34 +549,37 @@ struct converter {
                 allocation.allocationSize = requirements.size;
                 allocation.memoryTypeIndex = type;
                 VkResult allocate_result = vkAllocateMemory(
-                    device, &allocation, nullptr, &input_memory);
+                    device, &allocation, nullptr, &item.memory);
                 if (!vk_ok(allocate_result)) {
                         close(import.fd);
-                        vkDestroyImage(device, input, nullptr);
-                        input = {};
+                        vkDestroyImage(device, item.image, nullptr);
                         close_fds();
                         return fail("Vulkan cannot import Y410 DMA-BUF");
                 }
-                if (!vk_ok(vkBindImageMemory(device, input,
-                                             input_memory, 0))) {
-                        destroy_input();
+                if (!vk_ok(vkBindImageMemory(device, item.image,
+                                             item.memory, 0))) {
+                        vkFreeMemory(device, item.memory, nullptr);
+                        vkDestroyImage(device, item.image, nullptr);
                         close_fds();
                         return fail("Vulkan cannot import Y410 DMA-BUF");
                 }
                 close_fds();
                 VkImageViewCreateInfo view{
                     VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-                view.image = input;
+                view.image = item.image;
                 view.viewType = VK_IMAGE_VIEW_TYPE_2D;
                 view.format = image_info.format;
                 view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                 view.subresourceRange.levelCount = 1;
                 view.subresourceRange.layerCount = 1;
                 if (!vk_ok(vkCreateImageView(device, &view, nullptr,
-                                              &input_view))) {
-                        destroy_input();
+                                              &item.view))) {
+                        vkFreeMemory(device, item.memory, nullptr);
+                        vkDestroyImage(device, item.image, nullptr);
                         return fail("Cannot create imported Y410 image view");
                 }
+                imported_surfaces.push_back(item);
+                current_surface = &imported_surfaces.back();
                 update_descriptor();
                 return true;
         }
@@ -558,7 +587,7 @@ struct converter {
         void update_descriptor(VkBuffer destination = {})
         {
                 VkDescriptorImageInfo image_descriptor{};
-                image_descriptor.imageView = input_view;
+                image_descriptor.imageView = current_surface->view;
                 image_descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 VkDescriptorBufferInfo buffer_descriptor{
                     destination ? destination : output, 0, output_size};
@@ -606,7 +635,7 @@ struct converter {
                 acquire.newLayout = VK_IMAGE_LAYOUT_GENERAL;
                 acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
                 acquire.dstQueueFamilyIndex = queue_family;
-                acquire.image = input;
+                acquire.image = current_surface->image;
                 acquire.subresourceRange.aspectMask =
                     VK_IMAGE_ASPECT_COLOR_BIT;
                 acquire.subresourceRange.levelCount = 1;
@@ -648,8 +677,11 @@ struct converter {
                 VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
                 submit.commandBufferCount = 1;
                 submit.pCommandBuffers = &command;
-                if (!vk_ok(vkQueueSubmit(queue, 1, &submit, {})) ||
-                    !vk_ok(vkQueueWaitIdle(queue)))
+                if (!vk_ok(vkResetFences(device, 1, &conversion_fence)) ||
+                    !vk_ok(vkQueueSubmit(queue, 1, &submit,
+                                         conversion_fence)) ||
+                    !vk_ok(vkWaitForFences(device, 1, &conversion_fence,
+                                           VK_TRUE, UINT64_MAX)))
                         return fail("Vulkan conversion submission failed");
                 if (!direct && !output_coherent) {
                         VkMappedMemoryRange range{

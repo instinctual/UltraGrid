@@ -171,6 +171,10 @@ class PlaybackDelegate : public IDeckLinkVideoOutputCallback // , public IDeckLi
         uint64_t        frames_dropped = 0;
         uint64_t frames_flushed = 0;
         uint64_t frames_late = 0;
+        atomic<uint64_t> frames_repeated{};
+        atomic<uint64_t> frames_dismissed{};
+        atomic<uint64_t> schedule_failures{};
+        atomic<uint64_t> audio_underflows{};
 
         IDeckLinkOutput *m_deckLinkOutput{};
         mutex schedLock;
@@ -184,6 +188,7 @@ class PlaybackDelegate : public IDeckLinkVideoOutputCallback // , public IDeckLi
         unsigned m_max_sched_frames = DEFAULT_MAX_SCHED_FRAMES;
         BMDTimeValue frameRateDuration{};
         BMDTimeScale frameRateScale{};
+        atomic_bool playback_started = false;
 
       public:
         enum {
@@ -201,7 +206,8 @@ class PlaybackDelegate : public IDeckLinkVideoOutputCallback // , public IDeckLi
                 frameRateScale    = fs;
         }
         void SetSynchronizedParams(const char *cfg);
-        bool Preroll(struct state_decklink_vdisp *s);
+        bool StartPlayback();
+        bool IsPlaybackStarted() const { return playback_started.load(); }
         void Reset();
         void ResetAudio() { m_audio_sync_ts = audio_sync_val::deinit; }
 
@@ -274,7 +280,11 @@ void PlaybackDelegate::PrintStats()
                 LOG(LOG_LEVEL_VERBOSE)
                     << MOD_NAME << frames_late << " frames late, "
                     << frames_dropped << " dropped, " << frames_flushed
-                    << " flushed cumulative\n";
+                    << " flushed, " << frames_repeated.load() << " repeated, "
+                    << frames_dismissed.load() << " dismissed, "
+                    << schedule_failures.load() << " schedule failures, "
+                    << audio_underflows.load()
+                    << " audio underflows cumulative\n";
                 t0 = now;
         }
 }
@@ -439,6 +449,7 @@ void PlaybackDelegate::Reset()
                 schedFrames.pop();
         }
         schedSeq = 0;
+        playback_started = false;
 }
 
 bool PlaybackDelegate::EnqueueFrame(DeckLinkFrame *deckLinkFrame)
@@ -473,6 +484,7 @@ void PlaybackDelegate::ScheduleNextFrame()
                         LOG(LOG_LEVEL_WARNING)
                             << MOD_NAME "Dismissed frame, buffered: " << i
                             << "\n";
+                        frames_dismissed += 1;
                         f->Release();
                         continue;
                 }
@@ -496,6 +508,7 @@ void PlaybackDelegate::ScheduleNextFrame()
                         LOG(LOG_LEVEL_ERROR)
                             << MOD_NAME << "ScheduleVideoFrame: "
                             << bmd_hresult_to_string(result) << "\n";
+                        schedule_failures += 1;
                         f->Release();
                         m_audio_sync_ts = audio_sync_val::resync;
                         continue;
@@ -506,9 +519,17 @@ void PlaybackDelegate::ScheduleNextFrame()
         if (i >= m_min_sched_frames || lastSchedFrame == nullptr) {
                 return;
         }
-        for (; i < (m_min_sched_frames + m_max_sched_frames + 1) / 2; ++i) {
-                LOG(LOG_LEVEL_WARNING) << MOD_NAME "Missing frame\n";
-                m_audio_sync_ts = audio_sync_val::resync;
+        const unsigned target = playback_started
+                                    ? (m_min_sched_frames +
+                                       m_max_sched_frames + 1) /
+                                          2
+                                    : m_min_sched_frames;
+        for (; i < target; ++i) {
+                if (playback_started) {
+                        LOG(LOG_LEVEL_WARNING) << MOD_NAME "Missing frame\n";
+                        m_audio_sync_ts = audio_sync_val::resync;
+                        frames_repeated += 1;
+                }
                 // Each successful ScheduleVideoFrame() owns one reference until
                 // ScheduledFrameCompleted(). Keep the separate lastSchedFrame
                 // reference intact while the same frame covers an underrun.
@@ -521,6 +542,7 @@ void PlaybackDelegate::ScheduleNextFrame()
                         LOG(LOG_LEVEL_ERROR)
                             << MOD_NAME << "ScheduleVideoFrame (repeat): "
                             << bmd_hresult_to_string(result) << "\n";
+                        schedule_failures += 1;
                         break;
                 }
                 schedSeq += 1;
@@ -882,6 +904,9 @@ static bool display_decklink_putf(void *state, struct video_frame *frame,
         } else {
                 deckLinkFrame->timestamp = frame->timestamp;
                 ret = s->delegate.EnqueueFrame(deckLinkFrame);
+                if (ret) {
+                        ret = s->delegate.StartPlayback();
+                }
         }
         if(s->emit_timecode) {
                 update_timecode(s->timecode, s->vid_desc.fps);
@@ -1149,9 +1174,6 @@ display_decklink_reconfigure(void *state, struct video_desc desc)
                 // Provide this class as a delegate to a video output interface
                 s->deckLinkOutput->SetScheduledFrameCompletionCallback(
                     &s->delegate);
-                if (!s->delegate.Preroll(s)) {
-                        return false;
-                }
         }
 
         s->initialized = true;
@@ -1160,26 +1182,21 @@ display_decklink_reconfigure(void *state, struct video_desc desc)
 }
 
 bool
-PlaybackDelegate::Preroll(struct state_decklink_vdisp *s)
+PlaybackDelegate::StartPlayback()
 {
-        auto *f = allocate_new_decklink_frame(s);
-        for (unsigned i = 0;
-             i < (m_min_sched_frames + m_min_sched_frames + 1) / 2; ++i) {
-                f->AddRef();
-                const bool ret = EnqueueFrame(f);
-                assert(ret);
-                ScheduleNextFrame();
+        if (playback_started) {
+                return true;
         }
-        f->Release(); // release initial reference from alloc
+        ScheduleNextFrame();
         HRESULT result =
             m_deckLinkOutput->StartScheduledPlayback(0, frameRateScale, 1.0);
         if (FAILED(result)) {
                 LOG(LOG_LEVEL_ERROR)
                     << MOD_NAME << "StartScheduledPlayback (video): "
                     << bmd_hresult_to_string(result) << "\n";
-                m_deckLinkOutput->DisableVideoOutput();
                 return false;
         }
+        playback_started = true;
         return true;
 }
 
@@ -1761,6 +1778,9 @@ static bool display_decklink_get_property(void *state, int property, void *val, 
  */
 void PlaybackDelegate::ScheduleAudio(const struct audio_frame *frame,
                                      uint32_t *const samples, bool underflow) {
+        if (!playback_started) {
+                return;
+        }
         if (m_adata.saved_sync_ts == INT64_MIN &&
             m_audio_sync_ts == audio_sync_val::deinit) {
                         return;
@@ -1813,6 +1833,7 @@ void PlaybackDelegate::ScheduleAudio(const struct audio_frame *frame,
         }
 
         if (underflow) {
+                audio_underflows += 1;
                 static unsigned count;
                 if (count++ == 50) {
                         MSG(WARNING, "Excessive underflow in sync mode! Try to "
@@ -1835,7 +1856,8 @@ static void display_decklink_put_audio_frame(void *state, const struct audio_fra
 
         uint32_t buffered = 0;
         s->deckLinkOutput->GetBufferedAudioSampleFrameCount(&buffered);
-        if (buffered == 0) {
+        if (buffered == 0 &&
+            (s->low_latency || s->delegate.IsPlaybackStarted())) {
                 LOG(LOG_LEVEL_WARNING) << MOD_NAME << "audio buffer underflow!\n";
         }
 
