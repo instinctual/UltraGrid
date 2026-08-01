@@ -1758,6 +1758,30 @@ struct decklink_accessed_buffers {
         std::vector<IDeckLinkVideoBuffer *> buffers;
 };
 
+static bool
+start_decklink_buffer_access(IDeckLinkVideoFrame *frame,
+                             IDeckLinkVideoBuffer **buffer, void **bytes)
+{
+        if (frame == nullptr ||
+            frame->QueryInterface(IID_IDeckLinkVideoBuffer,
+                                  reinterpret_cast<void **>(buffer)) != S_OK ||
+            *buffer == nullptr) {
+                return false;
+        }
+        if ((*buffer)->StartAccess(bmdBufferAccessRead) != S_OK) {
+                (*buffer)->Release();
+                *buffer = nullptr;
+                return false;
+        }
+        if ((*buffer)->GetBytes(bytes) != S_OK || *bytes == nullptr) {
+                (*buffer)->EndAccess(bmdBufferAccessRead);
+                (*buffer)->Release();
+                *buffer = nullptr;
+                return false;
+        }
+        return true;
+}
+
 static void
 dispose_decklink_accessed_frame(struct video_frame *frame)
 {
@@ -1873,15 +1897,8 @@ vidcap_decklink_grab(void *state, struct audio_frame **audio)
                 for (unsigned int tile = 0; tile < 2; ++tile) {
                         IDeckLinkVideoBuffer *buffer = nullptr;
                         void *bytes = nullptr;
-                        if (frames[tile] == nullptr ||
-                            frames[tile]->QueryInterface(
-                                    IID_IDeckLinkVideoBuffer,
-                                    reinterpret_cast<void **>(&buffer)) != S_OK ||
-                            buffer == nullptr ||
-                            buffer->StartAccess(bmdBufferAccessRead) != S_OK ||
-                            buffer->GetBytes(&bytes) != S_OK ||
-                            bytes == nullptr) {
-                                if (buffer != nullptr) buffer->Release();
+                        if (!start_decklink_buffer_access(
+                                    frames[tile], &buffer, &bytes)) {
                                 valid = false;
                                 break;
                         }
@@ -1893,15 +1910,8 @@ vidcap_decklink_grab(void *state, struct audio_frame **audio)
                         auto *decklink_frame = s->state[i].delegate->lastFrame;
                         IDeckLinkVideoBuffer *buffer = nullptr;
                         void *bytes = nullptr;
-                        if (decklink_frame == nullptr ||
-                            decklink_frame->QueryInterface(
-                                    IID_IDeckLinkVideoBuffer,
-                                    reinterpret_cast<void **>(&buffer)) != S_OK ||
-                            buffer == nullptr ||
-                            buffer->StartAccess(bmdBufferAccessRead) != S_OK ||
-                            buffer->GetBytes(&bytes) != S_OK ||
-                            bytes == nullptr) {
-                                if (buffer != nullptr) buffer->Release();
+                        if (!start_decklink_buffer_access(
+                                    decklink_frame, &buffer, &bytes)) {
                                 valid = false;
                                 break;
                         }

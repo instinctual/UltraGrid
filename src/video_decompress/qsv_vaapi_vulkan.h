@@ -13,6 +13,7 @@ void qsv_vaapi_vulkan_destroy(void *state);
 bool qsv_vaapi_vulkan_convert(void *state, unsigned int va_surface,
                               unsigned char *destination,
                               size_t destination_stride);
+bool qsv_vaapi_vulkan_used_direct_output(void *state);
 const char *qsv_vaapi_vulkan_error(void *state);
 
 #ifdef __cplusplus

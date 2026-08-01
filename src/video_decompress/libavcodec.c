@@ -125,6 +125,7 @@ struct state_libavcodec_decompress {
         AVFrame     *qsv_va_frame;
         void        *qsv_r10k_vulkan;
         bool         qsv_direct_disabled;
+        bool         qsv_direct_output_reported;
 #endif
 };
 
@@ -149,6 +150,7 @@ static void deconfigure(struct state_libavcodec_decompress *s)
         av_buffer_unref(&s->qsv_va_device);
         av_frame_free(&s->qsv_va_frame);
         s->qsv_direct_disabled = false;
+        s->qsv_direct_output_reported = false;
 #endif
 
         s->convert_in = AV_PIX_FMT_NONE;
@@ -1258,6 +1260,16 @@ static decompress_status libavcodec_decompress(void *state, unsigned char *dst, 
                                     qsv_vaapi_vulkan_convert(
                                         s->qsv_r10k_vulkan, surface, dst,
                                         s->pitch);
+                                if (converted_direct &&
+                                    !s->qsv_direct_output_reported &&
+                                    qsv_vaapi_vulkan_used_direct_output(
+                                        s->qsv_r10k_vulkan)) {
+                                        MSG(INFO,
+                                            "Vulkan is writing R10k directly "
+                                            "into the DeckLink output buffer "
+                                            "(CPU frame copy eliminated)\n");
+                                        s->qsv_direct_output_reported = true;
+                                }
                         }
                 }
                 if (!converted_direct) {

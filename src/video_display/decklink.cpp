@@ -69,6 +69,10 @@
 #include <utility>                               // for pair
 #include <vector>
 
+#ifdef _WIN32
+#include <malloc.h>
+#endif
+
 #define DECKLINK_MAGIC to_fourcc('v', 'd', 'D', 'L')
 #define MOD_NAME "[DeckLink display] "
 
@@ -353,7 +357,7 @@ class DeckLinkFrame : public IDeckLinkMutableVideoFrame,
                 long height;
                 long rawBytes;
                 BMDPixelFormat pixelFormat;
-                unique_ptr<char []> data;
+                char *data{};
 
                 IDeckLinkTimecode *timecode;
 
@@ -1964,10 +1968,24 @@ ULONG DeckLinkFrame::Release()
 }
 
 DeckLinkFrame::DeckLinkFrame(long w, long h, long rb, BMDPixelFormat pf, buffer_pool_t & bp, HDRMetadata const & hdr_metadata)
-	: width(w), height(h), rawBytes(rb), pixelFormat(pf), data(new char[rb * h]), timecode(NULL),
+	: width(w), height(h), rawBytes(rb), pixelFormat(pf), timecode(NULL),
         buffer_pool(bp)
 {
-        clear_video_buffer(reinterpret_cast<unsigned char *>(data.get()), rawBytes, rawBytes, height,
+        // Page alignment allows Vulkan VK_EXT_external_memory_host to import
+        // this buffer directly.  It remains ordinary host memory for DeckLink
+        // and for systems where that optional path is unavailable.
+        const size_t bytes = static_cast<size_t>(rawBytes) * height;
+        const size_t allocation_size = (bytes + 4095U) & ~size_t{4095U};
+#ifdef _WIN32
+        data = static_cast<char *>(_aligned_malloc(allocation_size, 4096));
+        if (data == nullptr) {
+#else
+        if (posix_memalign(reinterpret_cast<void **>(&data), 4096,
+                          allocation_size) != 0) {
+#endif
+                throw std::bad_alloc();
+        }
+        clear_video_buffer(reinterpret_cast<unsigned char *>(data), rawBytes, rawBytes, height,
                         pf == bmdFormat8BitYUV ? UYVY : (pf == bmdFormat10BitYUV ? v210 : RGBA));
         m_metadata = hdr_metadata;
 }
@@ -1979,6 +1997,11 @@ DeckLinkFrame *DeckLinkFrame::Create(long width, long height, long rawBytes, BMD
 
 DeckLinkFrame::~DeckLinkFrame() 
 {
+#ifdef _WIN32
+        _aligned_free(data);
+#else
+        free(data);
+#endif
 }
 
 long DeckLinkFrame::GetWidth ()
@@ -2008,7 +2031,7 @@ BMDFrameFlags DeckLinkFrame::GetFlags ()
 
 HRESULT DeckLinkFrame::GetBytes (/* out */ void **buffer)
 {
-        *buffer = static_cast<void *>(data.get());
+        *buffer = static_cast<void *>(data);
         return S_OK;
 }
 

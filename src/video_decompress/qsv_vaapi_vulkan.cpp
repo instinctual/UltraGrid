@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,17 @@ struct converter {
         VkDeviceMemory output_memory{};
         void *output_mapping{};
         bool output_coherent{};
+        bool external_host_available{};
+        bool last_direct_output{};
+        VkDeviceSize external_host_alignment{};
+        PFN_vkGetMemoryHostPointerPropertiesEXT
+            get_memory_host_pointer_properties{};
+        struct direct_output {
+                void *pointer{};
+                VkBuffer buffer{};
+                VkDeviceMemory memory{};
+        };
+        std::vector<direct_output> direct_outputs;
 
         VkDescriptorSetLayout descriptor_layout{};
         VkDescriptorPool descriptor_pool{};
@@ -87,11 +99,23 @@ struct converter {
                 input_memory = {};
         }
 
+        void destroy_direct_outputs()
+        {
+                for (auto &item : direct_outputs) {
+                        if (item.buffer)
+                                vkDestroyBuffer(device, item.buffer, nullptr);
+                        if (item.memory)
+                                vkFreeMemory(device, item.memory, nullptr);
+                }
+                direct_outputs.clear();
+        }
+
         ~converter()
         {
                 if (device)
                         vkDeviceWaitIdle(device);
                 destroy_input();
+                destroy_direct_outputs();
                 if (pipeline)
                         vkDestroyPipeline(device, pipeline, nullptr);
                 if (pipeline_layout)
@@ -168,23 +192,59 @@ struct converter {
                 queue_info.queueFamilyIndex = queue_family;
                 queue_info.queueCount = 1;
                 queue_info.pQueuePriorities = &priority;
-                const char *extensions[] = {
+                std::vector<const char *> extensions = {
                     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
                     VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
                     VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
                     VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
                 };
+                uint32_t extension_count = 0;
+                vkEnumerateDeviceExtensionProperties(
+                    physical, nullptr, &extension_count, nullptr);
+                std::vector<VkExtensionProperties> available_extensions(
+                    extension_count);
+                vkEnumerateDeviceExtensionProperties(
+                    physical, nullptr, &extension_count,
+                    available_extensions.data());
+                const bool has_external_host = std::any_of(
+                    available_extensions.begin(),
+                    available_extensions.end(), [](const auto &extension) {
+                            return std::strcmp(
+                                       extension.extensionName,
+                                       VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) ==
+                                   0;
+                    });
+                if (has_external_host)
+                        extensions.push_back(
+                            VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
                 VkDeviceCreateInfo device_info{
                     VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
                 device_info.queueCreateInfoCount = 1;
                 device_info.pQueueCreateInfos = &queue_info;
-                device_info.enabledExtensionCount =
-                    sizeof extensions / sizeof extensions[0];
-                device_info.ppEnabledExtensionNames = extensions;
+                device_info.enabledExtensionCount = extensions.size();
+                device_info.ppEnabledExtensionNames = extensions.data();
                 if (!vk_ok(vkCreateDevice(physical, &device_info, nullptr,
                                           &device)))
                         return fail("Cannot create Vulkan device");
                 vkGetDeviceQueue(device, queue_family, 0, &queue);
+                get_memory_host_pointer_properties =
+                    reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
+                        vkGetDeviceProcAddr(
+                            device,
+                            "vkGetMemoryHostPointerPropertiesEXT"));
+                if (has_external_host &&
+                    get_memory_host_pointer_properties != nullptr) {
+                        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host{
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+                        VkPhysicalDeviceProperties2 properties{
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+                        properties.pNext = &host;
+                        vkGetPhysicalDeviceProperties2(physical, &properties);
+                        external_host_alignment =
+                            host.minImportedHostPointerAlignment;
+                        external_host_available =
+                            external_host_alignment != 0;
+                }
 
                 VkBufferCreateInfo buffer_info{
                     VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -306,6 +366,80 @@ struct converter {
                 return true;
         }
 
+        VkBuffer direct_buffer(void *destination)
+        {
+                if (!external_host_available ||
+                    reinterpret_cast<uintptr_t>(destination) %
+                            external_host_alignment !=
+                        0)
+                        return {};
+                auto found = std::find_if(
+                    direct_outputs.begin(), direct_outputs.end(),
+                    [destination](const direct_output &item) {
+                            return item.pointer == destination;
+                    });
+                if (found != direct_outputs.end())
+                        return found->buffer;
+
+                direct_output item{};
+                item.pointer = destination;
+                VkExternalMemoryBufferCreateInfo external{
+                    VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+                external.handleTypes =
+                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+                VkBufferCreateInfo info{
+                    VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                info.pNext = &external;
+                info.size = output_size;
+                info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                if (!vk_ok(vkCreateBuffer(device, &info, nullptr,
+                                           &item.buffer)))
+                        return {};
+                VkMemoryRequirements requirements{};
+                vkGetBufferMemoryRequirements(device, item.buffer,
+                                              &requirements);
+                VkMemoryHostPointerPropertiesEXT host{
+                    VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+                if (!vk_ok(get_memory_host_pointer_properties(
+                        device,
+                        VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                        destination, &host))) {
+                        vkDestroyBuffer(device, item.buffer, nullptr);
+                        return {};
+                }
+                uint32_t type =
+                    memory_type(requirements.memoryTypeBits &
+                                    host.memoryTypeBits,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                if (type == UINT32_MAX) {
+                        vkDestroyBuffer(device, item.buffer, nullptr);
+                        return {};
+                }
+                VkImportMemoryHostPointerInfoEXT import{
+                    VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+                import.handleType =
+                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+                import.pHostPointer = destination;
+                VkMemoryAllocateInfo allocation{
+                    VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                allocation.pNext = &import;
+                allocation.allocationSize = requirements.size;
+                allocation.memoryTypeIndex = type;
+                if (!vk_ok(vkAllocateMemory(device, &allocation, nullptr,
+                                             &item.memory)) ||
+                    !vk_ok(vkBindBufferMemory(device, item.buffer,
+                                              item.memory, 0))) {
+                        if (item.memory)
+                                vkFreeMemory(device, item.memory, nullptr);
+                        vkDestroyBuffer(device, item.buffer, nullptr);
+                        return {};
+                }
+                direct_outputs.push_back(item);
+                return item.buffer;
+        }
+
         bool import_surface(VASurfaceID surface)
         {
                 destroy_input();
@@ -421,13 +555,13 @@ struct converter {
                 return true;
         }
 
-        void update_descriptor()
+        void update_descriptor(VkBuffer destination = {})
         {
                 VkDescriptorImageInfo image_descriptor{};
                 image_descriptor.imageView = input_view;
                 image_descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                 VkDescriptorBufferInfo buffer_descriptor{
-                    output, 0, output_size};
+                    destination ? destination : output, 0, output_size};
                 VkWriteDescriptorSet writes[2]{};
                 writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[0].dstSet = descriptor_set;
@@ -451,6 +585,13 @@ struct converter {
         {
                 if (!import_surface(surface))
                         return false;
+                VkBuffer direct{};
+                if (destination_stride ==
+                    static_cast<size_t>(width) * 4U) {
+                        direct = direct_buffer(destination);
+                        update_descriptor(direct);
+                }
+                last_direct_output = direct != VK_NULL_HANDLE;
                 vkResetCommandBuffer(command, 0);
                 VkCommandBufferBeginInfo begin{
                     VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -510,7 +651,7 @@ struct converter {
                 if (!vk_ok(vkQueueSubmit(queue, 1, &submit, {})) ||
                     !vk_ok(vkQueueWaitIdle(queue)))
                         return fail("Vulkan conversion submission failed");
-                if (!output_coherent) {
+                if (!direct && !output_coherent) {
                         VkMappedMemoryRange range{
                             VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
                         range.memory = output_memory;
@@ -520,17 +661,21 @@ struct converter {
                                 return fail(
                                     "Cannot invalidate Vulkan output memory");
                 }
-                const size_t row = static_cast<size_t>(width) * 4U;
-                if (destination_stride == row) {
-                        std::memcpy(destination, output_mapping, output_size);
-                } else {
-                        for (int y = 0; y < height; ++y)
-                                std::memcpy(
-                                    destination + y * destination_stride,
-                                    static_cast<unsigned char *>(
-                                        output_mapping) +
-                                        y * row,
-                                    row);
+                if (!direct) {
+                        const size_t row = static_cast<size_t>(width) * 4U;
+                        if (destination_stride == row) {
+                                std::memcpy(destination, output_mapping,
+                                            output_size);
+                        } else {
+                                for (int y = 0; y < height; ++y)
+                                        std::memcpy(
+                                            destination +
+                                                y * destination_stride,
+                                            static_cast<unsigned char *>(
+                                                output_mapping) +
+                                                y * row,
+                                            row);
+                        }
                 }
                 return true;
         }
@@ -557,6 +702,13 @@ extern "C" void
 qsv_vaapi_vulkan_destroy(void *state)
 {
         delete static_cast<converter *>(state);
+}
+
+extern "C" bool
+qsv_vaapi_vulkan_used_direct_output(void *state)
+{
+        return state != nullptr &&
+               static_cast<converter *>(state)->last_direct_output;
 }
 
 extern "C" bool
