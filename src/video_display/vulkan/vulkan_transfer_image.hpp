@@ -141,6 +141,11 @@ struct Image2D{
                 vk::AccessFlags initial_access, InitialImageData preinitialised, vk::ImageTiling tiling,
                 vk::MemoryPropertyFlags requested_properties, vk::MemoryPropertyFlags optional_properties);
 
+        bool init_external_host(VulkanContext& context,
+                vk::Extent2D size, vk::Format format,
+                vk::ImageUsageFlags usage, vk::AccessFlags initial_access,
+                InitialImageData preinitialised);
+
         vk::ImageView get_image_view(vk::Device device, vk::SamplerYcbcrConversion conversion);
         
         void destroy(vk::Device device);
@@ -157,6 +162,7 @@ struct Image2D{
         vk::ImageView view{};
 
         size_t byte_size{};
+        void *external_host_ptr{};
 
         vk::Extent2D size{};
         vk::Format format{};
@@ -263,4 +269,3 @@ private:
 };
 
 } //namespace vulkan_display
-

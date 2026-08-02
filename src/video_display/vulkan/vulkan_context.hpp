@@ -139,6 +139,9 @@ public:
         vk::PhysicalDevice get_gpu() { return gpu; }
         vk::Device get_device() { return device; }
         bool is_yCbCr_supported() const { return yCbCr_supported; }
+        bool is_external_host_memory_supported() const {
+                return external_host_memory_supported;
+        }
         uint32_t get_queue_family_index() { return queue_family_index; }
         vk::Queue get_queue() { return queue; }
         vk::SwapchainKHR get_swapchain() { return swapchain; }
@@ -178,6 +181,7 @@ private:
         vk::PhysicalDevice gpu;
         vk::Device device;
         bool yCbCr_supported = false;
+        bool external_host_memory_supported = false;
 
         uint32_t queue_family_index = no_queue_index_found;
         vk::Queue queue;

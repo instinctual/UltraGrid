@@ -37,6 +37,8 @@
 
 #include "vulkan_transfer_image.hpp"
 
+#include <cstdlib>
+
 using namespace vulkan_display_detail;
 using namespace vulkan_display;
 
@@ -161,6 +163,144 @@ void Image2D::init(VulkanContext& context, vk::Extent2D size, vk::Format format,
         device.bindImageMemory(image, memory, 0);
 }
 
+bool Image2D::init_external_host(
+        VulkanContext& context, vk::Extent2D requested_size,
+        vk::Format requested_format, vk::ImageUsageFlags usage,
+        vk::AccessFlags initial_access, InitialImageData preinitialised)
+{
+        if (!context.is_external_host_memory_supported()) {
+                return false;
+        }
+
+        VkDevice device = context.get_device();
+        VkPhysicalDevice physical = context.get_gpu();
+        auto get_host_properties =
+            reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
+                vkGetDeviceProcAddr(
+                    device, "vkGetMemoryHostPointerPropertiesEXT"));
+        if (get_host_properties == nullptr) {
+                return false;
+        }
+
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 properties{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        properties.pNext = &host_properties;
+        vkGetPhysicalDeviceProperties2(physical, &properties);
+        const VkDeviceSize host_alignment =
+            host_properties.minImportedHostPointerAlignment;
+        if (host_alignment == 0) {
+                return false;
+        }
+
+        VkExternalMemoryImageCreateInfo external{
+            VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+        external.handleTypes =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        image_info.pNext = &external;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.extent = {requested_size.width, requested_size.height, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.format = static_cast<VkFormat>(requested_format);
+        image_info.tiling = VK_IMAGE_TILING_LINEAR;
+        image_info.initialLayout =
+            preinitialised == InitialImageData::preinitialised
+                ? VK_IMAGE_LAYOUT_PREINITIALIZED
+                : VK_IMAGE_LAYOUT_UNDEFINED;
+        image_info.usage = static_cast<VkImageUsageFlags>(usage);
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkImage external_image{};
+        if (vkCreateImage(device, &image_info, nullptr, &external_image) !=
+            VK_SUCCESS) {
+                return false;
+        }
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(device, external_image, &requirements);
+        const VkDeviceSize alignment =
+            std::max(host_alignment, requirements.alignment);
+        const VkDeviceSize allocation_size =
+            (requirements.size + alignment - 1) / alignment * alignment;
+        void *host_ptr = nullptr;
+        if (posix_memalign(&host_ptr, static_cast<size_t>(alignment),
+                           static_cast<size_t>(allocation_size)) != 0) {
+                vkDestroyImage(device, external_image, nullptr);
+                return false;
+        }
+
+        VkMemoryHostPointerPropertiesEXT pointer_properties{
+            VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+        if (get_host_properties(
+                device,
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                host_ptr, &pointer_properties) != VK_SUCCESS) {
+                std::free(host_ptr);
+                vkDestroyImage(device, external_image, nullptr);
+                return false;
+        }
+
+        VkPhysicalDeviceMemoryProperties memory_properties{};
+        vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
+        const uint32_t usable_types =
+            requirements.memoryTypeBits & pointer_properties.memoryTypeBits;
+        uint32_t memory_type_index = UINT32_MAX;
+        constexpr VkMemoryPropertyFlags required_flags =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+                if ((usable_types & (1U << i)) != 0U &&
+                    (memory_properties.memoryTypes[i].propertyFlags &
+                     required_flags) == required_flags) {
+                        memory_type_index = i;
+                        break;
+                }
+        }
+        if (memory_type_index == UINT32_MAX) {
+                std::free(host_ptr);
+                vkDestroyImage(device, external_image, nullptr);
+                return false;
+        }
+
+        VkImportMemoryHostPointerInfoEXT import{
+            VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+        import.handleType =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+        import.pHostPointer = host_ptr;
+        VkMemoryAllocateInfo allocation{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocation.pNext = &import;
+        allocation.allocationSize = allocation_size;
+        allocation.memoryTypeIndex = memory_type_index;
+        VkDeviceMemory external_memory{};
+        if (vkAllocateMemory(device, &allocation, nullptr, &external_memory) !=
+                VK_SUCCESS ||
+            vkBindImageMemory(device, external_image, external_memory, 0) !=
+                VK_SUCCESS) {
+                if (external_memory != VK_NULL_HANDLE) {
+                        vkFreeMemory(device, external_memory, nullptr);
+                }
+                std::free(host_ptr);
+                vkDestroyImage(device, external_image, nullptr);
+                return false;
+        }
+
+        image = external_image;
+        memory = external_memory;
+        external_host_ptr = host_ptr;
+        byte_size = static_cast<size_t>(allocation_size);
+        size = requested_size;
+        format = requested_format;
+        access = initial_access;
+        layout = preinitialised == InitialImageData::preinitialised
+                     ? vk::ImageLayout::ePreinitialized
+                     : vk::ImageLayout::eUndefined;
+        return true;
+}
+
 vk::ImageView Image2D::get_image_view(vk::Device device, vk::SamplerYcbcrConversion conversion) {
         if(!view){
                 assert(image);
@@ -184,6 +324,10 @@ void Image2D::destroy(vk::Device device) {
         if (memory) {
                 device.freeMemory(memory);
         }
+        if (external_host_ptr) {
+                std::free(external_host_ptr);
+                external_host_ptr = nullptr;
+        }
 }
 
 void TransferImageImpl::recreate(VulkanContext& context, ImageDescription description) {
@@ -192,14 +336,29 @@ void TransferImageImpl::recreate(VulkanContext& context, ImageDescription descri
         
         auto device = context.get_device();
 
-        buffer.init(context, get_buffer_size(description), description.format_info().buffer_format, vk::ImageUsageFlagBits::eSampled, vk::AccessFlagBits::eHostWrite,
-                InitialImageData::preinitialised, MemoryLocation::host_local);
-        
-        void* void_ptr = device.mapMemory(buffer.memory, 0, buffer.byte_size);
-        if (void_ptr == nullptr) {
-                throw VulkanError{"Image memory cannot be mapped."};
+        const auto buffer_size = get_buffer_size(description);
+        const auto buffer_format = description.format_info().buffer_format;
+        if (buffer.init_external_host(
+                context, buffer_size, buffer_format,
+                vk::ImageUsageFlagBits::eSampled,
+                vk::AccessFlagBits::eHostWrite,
+                InitialImageData::preinitialised)) {
+                ptr = static_cast<unsigned char *>(buffer.external_host_ptr);
+        } else {
+                buffer.init(
+                    context, buffer_size, buffer_format,
+                    vk::ImageUsageFlagBits::eSampled,
+                    vk::AccessFlagBits::eHostWrite,
+                    InitialImageData::preinitialised,
+                    MemoryLocation::host_local);
+
+                void* void_ptr =
+                    device.mapMemory(buffer.memory, 0, buffer.byte_size);
+                if (void_ptr == nullptr) {
+                        throw VulkanError{"Image memory cannot be mapped."};
+                }
+                ptr = reinterpret_cast<unsigned char*>(void_ptr);
         }
-        ptr = reinterpret_cast<unsigned char*>(void_ptr);
 
         vk::ImageSubresource subresource{ vk::ImageAspectFlagBits::eColor, 0, 0 };
         row_pitch = device.getImageSubresourceLayout(buffer.image, subresource).rowPitch;
@@ -239,7 +398,9 @@ void TransferImageImpl::preprocess() {
 }
 
 void TransferImageImpl::destroy(vk::Device device) {
-        device.unmapMemory(buffer.memory);
+        if (!buffer.external_host_ptr) {
+                device.unmapMemory(buffer.memory);
+        }
         buffer.destroy(device);
         device.destroy(is_available_fence);
 }

@@ -489,13 +489,30 @@ void VulkanContext::create_logical_device() {
                 .setPQueuePriorities(priorities.data())
                 .setQueueCount(1);
 
+        std::vector<const char *> enabled_extensions =
+            required_gpu_extensions;
+        const auto available_extensions =
+            gpu.enumerateDeviceExtensionProperties();
+        external_host_memory_supported = std::any_of(
+            available_extensions.begin(), available_extensions.end(),
+            [](const auto &extension) {
+                    return strcmp(
+                               extension.extensionName,
+                               VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) == 0;
+            });
+        if (external_host_memory_supported) {
+                enabled_extensions.push_back(
+                    VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+        }
+
         vk::DeviceCreateInfo device_info{};
         device_info
                 .setPNext(nullptr)
                 .setQueueCreateInfoCount(1)
                 .setPQueueCreateInfos(&queue_info)
-                .setEnabledExtensionCount(static_cast<uint32_t>(required_gpu_extensions.size()))
-                .setPpEnabledExtensionNames(required_gpu_extensions.data());
+                .setEnabledExtensionCount(
+                    static_cast<uint32_t>(enabled_extensions.size()))
+                .setPpEnabledExtensionNames(enabled_extensions.data());
 
         vk::PhysicalDeviceFeatures2 features2{};
         vk::PhysicalDeviceSamplerYcbcrConversionFeatures yCbCr_feature{};
@@ -694,4 +711,3 @@ void VulkanContext::destroy() {
 
 
 } //vulkan_display_detail
-

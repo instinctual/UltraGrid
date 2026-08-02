@@ -1266,7 +1266,7 @@ static decompress_status libavcodec_decompress(void *state, unsigned char *dst, 
                                         s->qsv_r10k_vulkan)) {
                                         MSG(INFO,
                                             "Vulkan is writing R10k directly "
-                                            "into the DeckLink output buffer "
+                                            "into the display output buffer "
                                             "(CPU frame copy eliminated)\n");
                                         s->qsv_direct_output_reported = true;
                                 }
