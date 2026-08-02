@@ -60,17 +60,15 @@ modeline.
 
 ## Build strict 10-bit Cage
 
-Stock Cage may choose an 8-bit compositor format. The included patch makes
-Cage 0.2.1 test `XR30` and then `XB30`, and refuse the output if neither works.
+Stock Cage may choose an 8-bit compositor format. The Instinctual Cage fork
+keeps the strict 10-bit output and systemd shutdown changes as separate
+commits. Release tag `v0.2.1-ultragrid.1` is based directly on upstream Cage
+0.2.1 and is the version validated by this deployment.
 
 ```bash
 workdir=$(mktemp -d)
-git clone --branch v0.2.1 --depth 1 \
-  https://github.com/cage-kiosk/cage.git "$workdir/cage"
-git -C "$workdir/cage" apply \
-  "$PWD/contrib/cage-kiosk/cage-0.2.1-require-10bit.patch"
-git -C "$workdir/cage" apply \
-  "$PWD/contrib/cage-kiosk/cage-0.2.1-terminate-client.patch"
+git clone --branch v0.2.1-ultragrid.1 --depth 1 \
+  https://github.com/instinctual/cage.git "$workdir/cage"
 meson setup "$workdir/cage/build" "$workdir/cage" \
   --buildtype=release -Dman-pages=disabled
 ninja -C "$workdir/cage/build"
@@ -79,6 +77,8 @@ install -m 0755 "$workdir/cage/build/cage" /tmp/cage-ultragrid-10bit
 
 Keep this patched binary separate from the distribution's Cage package so a
 package update cannot silently replace the strict 10-bit behavior.
+The two patch files beside this README are retained as an offline reproducible
+fallback and for easy comparison with upstream.
 
 ## Install the kiosk
 
@@ -142,6 +142,10 @@ sudo systemctl enable --now ultragrid-cage-receiver.service
 
 The unit conflicts with the display manager, the former Vulkan receiver
 service, the test Cage service, and tty1 getty, so only one owns DRM and tty1.
+It uses `Restart=always`: when an operator presses UltraGrid's `q` hotkey,
+UltraGrid and Cage exit successfully, and systemd starts a fresh kiosk session
+after two seconds. `Restart=on-failure` is insufficient because a `q` exit is
+reported as successful.
 
 ## Verify 10-bit and Full range
 

@@ -6,8 +6,8 @@ Last updated: 2026-08-01 (America/Los_Angeles)
 
 - Current checkout: `/home/administrator/UltraGrid`
 - Current branch: `master`
-- Latest implementation commit: `00224702b` — Eliminate the Vulkan receiver
-  frame copy
+- Latest implementation commit: `febb67675` — Add automatic 10-bit Cage
+  kiosk output
 - Organization remote: `instinctual` (`https://github.com/instinctual/UltraGrid.git`)
 - Upstream remote: `origin` (`https://github.com/CESNET/UltraGrid.git`)
 - Local `master` tracks `instinctual/master`.
@@ -51,6 +51,25 @@ patched Cage 0.2.1, SDL3 Wayland, and the UltraGrid Vulkan display. The
 deployment files and complete build, installation, verification, format-test,
 and rollback instructions are in
 `contrib/cage-kiosk/README.md`.
+
+The Cage changes are maintained in the organization fork
+`https://github.com/instinctual/cage`:
+
+- branch: `ultragrid-kiosk-0.2.1`
+- release tag: `v0.2.1-ultragrid.1`
+- strict 10-bit commit: `1e64458415db5e188a9165b2c6342af8195ae182`
+- primary-client shutdown commit:
+  `f34e1be8eb7e7ad9f7b98d12e3da34bc06366ad1`
+
+The fork's upstream-tracking `master` remains unchanged. Build kiosk releases
+from the pinned UltraGrid tag, not from the moving default branch. The patch
+files remain in this repository as an offline fallback.
+
+The kiosk unit must use `Restart=always`, not `Restart=on-failure`. Pressing
+UltraGrid's `q` hotkey cleanly exits UltraGrid, Cage then exits successfully,
+and systemd otherwise leaves the kiosk stopped. With `Restart=always`, the
+complete Cage/UltraGrid session respawns after two seconds. Keyboard input
+remains available for intentional UltraGrid hotkeys.
 
 The production `ultragrid-cage-receiver.service` is installed, enabled, and
 starts successfully after an unattended reboot; `gdm.service` is disabled.
@@ -254,6 +273,50 @@ changes, and a reboot of the machine producing the signal:
 Source clip changes or gaps can temporarily reduce received video packets and
 cause repeated frames. Distinguish this from network loss by checking RTP
 packet counters and whether DeckLink counters stop increasing after recovery.
+
+## Deferred intra-refresh work
+
+The current sender intentionally uses
+`hevc_vaapi:...:gop=24:disable_intra_refresh`. At 24 fps this provides a full
+intra/key frame approximately once per second; it does not use cyclic or
+rolling intra-refresh.
+
+The encoder's Intel Raptor Lake-P VA-API driver reports rolling-column and
+rolling-row intra-refresh support for the exact
+`VAProfileHEVCMain444_10/VAEntrypointEncSliceLP` profile used by the 10-bit
+4:4:4 path. The installed FFmpeg `hevc_vaapi` wrapper does not expose a
+corresponding intra-refresh option, however. Merely removing
+`disable_intra_refresh` from the UltraGrid command would not configure the
+VA-API rolling-refresh controls.
+
+FFmpeg's `hevc_qsv` encoder does expose `int_ref_type` values for vertical,
+horizontal, and slice refresh, along with cycle-size, cycle-distance, and QP
+delta controls. It accepts `xv30le`, and UltraGrid's QSV configuration already
+requests vertical intra-refresh with a 20-frame cycle when periodic refresh is
+enabled.
+
+Do not switch the production sender to QSV as a one-line command change. The
+current optimized R12L-to-identity XV30/Y410 conversion and direct VA surface
+path were built around `hevc_vaapi`; QSV must first be shown to preserve the
+identity color mapping and 10-bit 4:4:4 profile without adding an expensive
+copy or matrix conversion.
+
+If this work is resumed, test QSV side-by-side while leaving the known-good
+VA-API sender available for immediate rollback. Validate:
+
+- R12L identity color and range through the HDMI/SDI scopes;
+- HEVC Main 4:4:4 10-bit profile and decoder compatibility;
+- direct-surface behavior and R12L conversion/upload/encode timings;
+- bitrate peaks compared with the current 24-frame GOP;
+- recovery after packet loss and when a receiver joins mid-cycle;
+- recovery-point signaling and parameter/header availability; and
+- absence of rolling-refresh artifacts over repeated cycles.
+
+Rolling refresh should smooth the once-per-second full-intra bitrate peak, but
+its recovery occurs across the configured cycle rather than in one frame. At
+24 fps, the existing UltraGrid QSV default of 20 frames would take about
+0.83 seconds per refresh cycle, so measure both bitrate smoothness and actual
+error-recovery time before adopting it.
 
 ## Build and validation
 
