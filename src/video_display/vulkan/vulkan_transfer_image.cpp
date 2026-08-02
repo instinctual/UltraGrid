@@ -182,10 +182,11 @@ bool Image2D::init_external_host(
                 return false;
         }
 
-        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties{
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
-        VkPhysicalDeviceProperties2 properties{
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties{};
+        host_properties.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 properties{};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
         properties.pNext = &host_properties;
         vkGetPhysicalDeviceProperties2(physical, &properties);
         const VkDeviceSize host_alignment =
@@ -194,11 +195,12 @@ bool Image2D::init_external_host(
                 return false;
         }
 
-        VkExternalMemoryImageCreateInfo external{
-            VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+        VkExternalMemoryImageCreateInfo external{};
+        external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
         external.handleTypes =
             VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-        VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         image_info.pNext = &external;
         image_info.imageType = VK_IMAGE_TYPE_2D;
         image_info.extent = {requested_size.width, requested_size.height, 1};
@@ -232,8 +234,8 @@ bool Image2D::init_external_host(
                 return false;
         }
 
-        VkMemoryHostPointerPropertiesEXT pointer_properties{
-            VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+        VkMemoryHostPointerPropertiesEXT pointer_properties{};
+        pointer_properties.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
         if (get_host_properties(
                 device,
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
@@ -265,13 +267,13 @@ bool Image2D::init_external_host(
                 return false;
         }
 
-        VkImportMemoryHostPointerInfoEXT import{
-            VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+        VkImportMemoryHostPointerInfoEXT import{};
+        import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
         import.handleType =
             VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
         import.pHostPointer = host_ptr;
-        VkMemoryAllocateInfo allocation{
-            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        VkMemoryAllocateInfo allocation{};
+        allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocation.pNext = &import;
         allocation.allocationSize = allocation_size;
         allocation.memoryTypeIndex = memory_type_index;

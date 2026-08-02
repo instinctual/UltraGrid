@@ -1,28 +1,28 @@
 # UltraGrid R12L Streaming Handoff
 
-Last updated: 2026-08-01 (America/Los_Angeles)
+Last updated: 2026-08-02 (America/Los_Angeles)
 
 ## Repository state
 
 - Current checkout: `/home/administrator/UltraGrid`
 - Current branch: `master`
-- Latest implementation commit: `febb67675` — Add automatic 10-bit Cage
-  kiosk output
+- Latest deployed implementation commit: `609cd4b5c` — Harden Cage kiosk
+  restart behavior
 - Organization remote: `instinctual` (`https://github.com/instinctual/UltraGrid.git`)
 - Upstream remote: `origin` (`https://github.com/CESNET/UltraGrid.git`)
 - Local `master` tracks `instinctual/master`.
 - The completed `decklinkscheduling` and `r12l-identity-hevc` branches were
   fully merged and deleted locally and from the `instinctual` remote.
-- Current local binary SHA-256:
-  `7f9097fbfb9b1ebd6220823f0d8503a377bc6881c22aac225c83e4da0c34604e`
+- Current repository build (`bin/uv`) SHA-256:
+  `15b9f496ae3c7f506ff36217b9a53c08dc3a4caf2d940682a750072c6a26267c`
 
 Recent commits:
 
-1. `b155a959b` — Document DeckLink streaming handoff
-2. `e907a7ecb` — Recover DeckLink format detection after signal loss
-3. `5d3032b2e` — Reduce Vulkan handoff overhead
-4. `60a4e955b` — Optimize DeckLink decode scheduling
-5. `a188eaace` — Optimize DeckLink buffer handoff
+1. `609cd4b5c` — Harden Cage kiosk restart behavior
+2. `febb67675` — Add automatic 10-bit Cage kiosk output
+3. `00224702b` — Eliminate the Vulkan receiver frame copy
+4. `33e8f6efb` — Update streaming handoff after watchdog deployment
+5. `e907a7ecb` — Recover DeckLink format detection after signal loss
 
 ## Machines
 
@@ -43,6 +43,47 @@ Both machines currently run the watchdog build at
 `7f9097fbfb9b1ebd6220823f0d8503a377bc6881c22aac225c83e4da0c34604e`.
 The previously installed binary was retained on each machine as
 `/tmp/uv-r12l-identity.pre-watchdog` for short-term rollback.
+
+## End-of-session operational state
+
+Leave both active machines running unless the operator requests a test:
+
+- `10.55.118.88`: `ultragrid-sender.service` is active, has zero service
+  restarts, captures approximately 24 fps, and sends to `10.55.118.91`.
+- `10.55.118.91`: `ultragrid-cage-receiver.service` is active and configured
+  with `Restart=always`. Its single recorded restart is the successful `q`
+  hotkey recovery test.
+- The current physical HDMI mode is 1920x1080p24, selected automatically from
+  the HD incoming stream.
+- `Broadcast RGB=Full` verifies on `/dev/dri/card1 HDMI-A-1`.
+- PipeWire routes the active UltraGrid stereo stream to the Sony HDMI sink;
+  both stream and sink gains are `1.00`.
+- The encoder's sampled RTCP reports show 0.00% packet loss.
+
+Quick read-only checks for the next session:
+
+```bash
+systemctl --no-pager --full status ultragrid-sender.service
+ssh administrator@10.55.118.91 \
+  'systemctl --no-pager --full status ultragrid-cage-receiver.service'
+ssh administrator@10.55.118.91 \
+  'XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 wlr-randr'
+ssh administrator@10.55.118.91 \
+  '/usr/local/bin/ug-drm-connector-config --verify-only'
+```
+
+Remaining Cage receiver validation:
+
+1. Exercise more SDI formats without restarting UltraGrid: fractional and
+   integer HD rates, 720p, true interlace, 2K DCI fallback, and exact 4K DCI.
+2. For every transition, confirm picture and synchronized audio recover,
+   `wlr-randr` selects the expected EDID timing, Full RGB remains set, and the
+   HDMI scope still reports 10-bit.
+3. Fix detailed Cage/UltraGrid log capture under the PAM-backed kiosk so
+   repeat/drop/late counters can be inspected remotely.
+4. Do not start the deferred intra-refresh experiment until explicitly
+   requested; the known-good production encoder remains `hevc_vaapi` with
+   `disable_intra_refresh`.
 
 ## Cage/HDMI receiver
 
@@ -79,6 +120,10 @@ Deployed SHA-256 values:
   `5506664e08d98f296889c776354af19b7db42fd676ab87f16f492a381c5e9662`
 - `/usr/local/bin/cage-ultragrid-10bit`:
   `db503f34afe68e43d27120f9f492ef9611ce8bddaf7a566d2207edd7f8f75a9f`
+- `/usr/local/libexec/ultragrid-cage-client`:
+  `8c7e40ea53640bb864d8b8d79b199e390ddbb714a6e25fbfaa463970d3aa71b1`
+- `/etc/systemd/system/ultragrid-cage-receiver.service`:
+  `16f63d6c69f0809604dea705992d5f27e759481ee822091fe7148b790c6df704`
 
 The path is intentionally strict:
 
@@ -115,15 +160,26 @@ case.
 After the final unattended reboot, the receiver again selected
 3840x2160p24, verified `Broadcast RGB=Full`, routed the UltraGrid stream to
 the current HDMI default sink, and reported `1.00` volume for both the stream
-and sink. The service remained active with zero automatic restarts.
+and sink.
+
+At the end of the 2026-08-01 session, the incoming stream had changed to HD
+and the physical output correctly followed it at 1920x1080p24. Full RGB still
+verified, the HDMI sink and UltraGrid stream were active at unity gain, and
+the kiosk service was active. Its restart counter was 1, corresponding to the
+successful test in which UltraGrid was exited with the `q` hotkey and the
+complete kiosk respawned after two seconds.
 
 The kiosk needs `PAMName=login` to create an active logind seat at unattended
 boot. PAM moves Cage and UltraGrid into a login-session cgroup, so unmodified
 Cage can wait indefinitely for UltraGrid during shutdown. The second included
 Cage patch signals its primary client with `SIGINT` before waiting. The unit
 also enables linger for `administrator`, starts `user@1000.service` for
-PipeWire, uses `SIGINT` for clean shutdown, and routes output to the journal so
-repeated/dropped/late-frame counters are observable remotely.
+PipeWire, and uses `SIGINT` for clean shutdown. The unit requests journal
+output, but detailed Cage and UltraGrid runtime lines are currently not
+appearing in `journalctl`; only systemd and PAM lifecycle lines are present.
+Do not interpret the absence of repeated/dropped/late messages there as zero
+events. Fix receiver log capture or add a separate stats path in a future
+session.
 
 The attached Sony EDID advertises 4096x2160 DCI but not 2048x1080 DCI. Test
 UHD, HD, 720p, true interlace, fractional rates, 2K DCI fallback, and exact 4K
@@ -132,7 +188,7 @@ for bit depth and range, not only from the Vulkan swapchain format.
 
 ## Signal and codec path
 
-The active path is:
+The active Cage/HDMI path is:
 
 1. DeckLink captures UHD 24 fps, 12-bit RGB 4:4:4 as R12L.
 2. The DeckLink 16.x input buffer is pinned with
@@ -144,16 +200,21 @@ The active path is:
    no all-intra mode.
 5. UltraGrid transports video and eight-channel Opus audio.
 6. Intel QSV decodes HEVC into a VA surface.
-7. VA DMA-BUF is imported into Vulkan, which converts identity Y410 directly
-   into the page-aligned R10k DeckLink output buffer.
-8. DeckLink emits single-link 12G SDI, RGB 4:4:4, with the R10k full-range
-   path enabled.
+7. VA DMA-BUF is imported directly into the Vulkan SDL3 display path.
+8. Patched Cage composites into an `XR30` or `XB30` 10-bit KMS framebuffer
+   and emits Full-range RGB over HDMI at the EDID mode selected from the
+   incoming UltraGrid description.
+
+The legacy DeckLink receiver at `10.55.118.89` remains available. Its final
+stages instead convert identity Y410 through Vulkan directly into the
+page-aligned R10k DeckLink output buffer, then emit single-link 12G SDI RGB
+4:4:4 with full-range R10k handling.
 
 The repository uses native DeckLink SDK 16.0 headers.
 
 ## Known-good runtime commands
 
-Encoder:
+Active encoder to Cage/HDMI receiver:
 
 ```text
 /usr/local/bin/uv-r12l-identity -4 -V \
@@ -162,10 +223,26 @@ Encoder:
   -A Opus:bitrate=192k \
   --param audioenc-frame-duration=5 \
   -c libavcodec:encoder=hevc_vaapi:rgb:depth=10:subsampling=444:bitrate=60000000:low_power=1:async_depth=1:slices=1:gop=24:disable_intra_refresh \
-  10.55.118.89
+  10.55.118.91
 ```
 
-Receiver:
+The active Cage receiver command is maintained in
+`contrib/cage-kiosk/ultragrid-cage-client` and currently resolves to:
+
+```text
+/usr/local/bin/uv-vulkan-sdl3 -4 -V \
+  -d vulkan:fs:modeset:gpu=integrated:display=0 \
+  -r pipewire \
+  --param decoder-use-codec=R10k \
+  --param decoder-drop-policy=blocking \
+  --param force-lavd-decoder=hevc_qsv \
+  --param low-latency-video
+```
+
+The wrapper first verifies wlroots output management and sets the default
+PipeWire sink to `1.0`. The `-4` option forces IPv4; `-V` enables video.
+
+Legacy DeckLink receiver:
 
 ```text
 /usr/local/bin/uv-r12l-identity -4 -V \
@@ -179,6 +256,8 @@ Receiver:
 ```
 
 Do not add `audio-lavc-decoder=libopus`; native Opus decoding is known-good.
+To send to the legacy DeckLink receiver instead, change only the encoder's
+destination from `10.55.118.91` to `10.55.118.89`.
 
 ## Required DeckLink behavior
 
@@ -223,7 +302,18 @@ No optimization above adds a frame queue or increases scheduled depth.
 
 ## Last measured steady state
 
-After deploying the watchdog build and restarting both runtime units:
+Current encoder measurements while sending 1920x1080p24 to the Cage receiver
+at the end of the 2026-08-01 session:
+
+- DeckLink capture: approximately 24 fps.
+- Encode path: approximately 6.0 ms total.
+  - R12L conversion: approximately 2.8 ms.
+  - Surface upload: 0.0 ms (direct path).
+  - VA encoder submit/output: approximately 3.2 ms.
+- RTCP receiver reports showed 0.00% packet loss in the sampled intervals.
+
+Earlier measurements after deploying the watchdog build to the UHD
+DeckLink-to-DeckLink path:
 
 - Encoder capture: approximately 24 fps.
 - Encoder encode path: approximately 15.9–17.0 ms total.

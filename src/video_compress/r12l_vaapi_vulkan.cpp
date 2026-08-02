@@ -143,19 +143,20 @@ struct r12l_vaapi_vulkan::impl {
                 plane.offset = desc.layers[0].offset[0];
                 plane.rowPitch = desc.layers[0].pitch[0];
                 plane.size = desc.objects[0].size;
-                VkImageDrmFormatModifierExplicitCreateInfoEXT modifier{
-                    VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT};
+                VkImageDrmFormatModifierExplicitCreateInfoEXT modifier{};
+                modifier.sType =
+                    VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
                 modifier.drmFormatModifier =
                     desc.objects[0].drm_format_modifier;
                 modifier.drmFormatModifierPlaneCount = 1;
                 modifier.pPlaneLayouts = &plane;
-                VkExternalMemoryImageCreateInfo external{
-                    VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+                VkExternalMemoryImageCreateInfo external{};
+                external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
                 external.pNext = &modifier;
                 external.handleTypes =
                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-                VkImageCreateInfo image_info{
-                    VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+                VkImageCreateInfo image_info{};
+                image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
                 image_info.pNext = &external;
                 image_info.imageType = VK_IMAGE_TYPE_2D;
                 image_info.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
@@ -181,18 +182,18 @@ struct r12l_vaapi_vulkan::impl {
                         close_fds();
                         return fail("No Vulkan memory type for the Y410 DMABUF");
                 }
-                VkMemoryDedicatedAllocateInfo dedicated{
-                    VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+                VkMemoryDedicatedAllocateInfo dedicated{};
+                dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
                 dedicated.image = output;
-                VkImportMemoryFdInfoKHR import{
-                    VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+                VkImportMemoryFdInfoKHR import{};
+                import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
                 import.pNext = &dedicated;
                 import.handleType =
                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
                 import.fd = desc.objects[0].fd;
                 desc.objects[0].fd = -1; // ownership passes to Vulkan
-                VkMemoryAllocateInfo allocation{
-                    VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                VkMemoryAllocateInfo allocation{};
+                allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
                 allocation.pNext = &import;
                 allocation.allocationSize = requirements.size;
                 allocation.memoryTypeIndex = type;
@@ -204,7 +205,8 @@ struct r12l_vaapi_vulkan::impl {
                 }
                 close_fds();
 
-                VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+                VkImageViewCreateInfo view{};
+                view.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
                 view.image = output;
                 view.viewType = VK_IMAGE_VIEW_TYPE_2D;
                 view.format = image_info.format;
@@ -250,11 +252,12 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
             static_cast<std::size_t>(width) * 9U / 2U * height;
         m->va_display = static_cast<VADisplay>(va_display);
 
-        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        VkApplicationInfo app{};
+        app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app.pApplicationName = "UltraGrid R12L";
         app.apiVersion = VK_API_VERSION_1_2;
-        VkInstanceCreateInfo instance_info{
-            VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+        VkInstanceCreateInfo instance_info{};
+        instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         instance_info.pApplicationInfo = &app;
         if (!vk_ok(vkCreateInstance(&instance_info, nullptr, &m->instance)))
                 return m->fail("Cannot create Vulkan instance");
@@ -285,8 +288,8 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
                         break;
                 }
         float priority = 1.0F;
-        VkDeviceQueueCreateInfo queue_info{
-            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        VkDeviceQueueCreateInfo queue_info{};
+        queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queue_info.queueFamilyIndex = m->queue_family;
         queue_info.queueCount = 1;
         queue_info.pQueuePriorities = &priority;
@@ -295,7 +298,8 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
             VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
             VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
         };
-        VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+        VkDeviceCreateInfo device_info{};
+        device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         device_info.queueCreateInfoCount = 1;
         device_info.pQueueCreateInfos = &queue_info;
         device_info.enabledExtensionCount = 3;
@@ -305,7 +309,8 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
                 return m->fail("Cannot create Vulkan device");
         vkGetDeviceQueue(m->device, m->queue_family, 0, &m->queue);
 
-        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buffer_info.size = m->source_size;
         buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -325,8 +330,8 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
         m->input_coherent =
             memory_props.memoryTypes[input_type].propertyFlags &
             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        VkMemoryAllocateInfo buffer_allocation{
-            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        VkMemoryAllocateInfo buffer_allocation{};
+        buffer_allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         buffer_allocation.allocationSize = buffer_requirements.size;
         buffer_allocation.memoryTypeIndex = input_type;
         if (!vk_ok(vkAllocateMemory(m->device, &buffer_allocation, nullptr,
@@ -341,8 +346,8 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
                        VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
                        VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo layout_info{
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        VkDescriptorSetLayoutCreateInfo layout_info{};
+        layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layout_info.bindingCount = 2;
         layout_info.pBindings = bindings;
         if (!vk_ok(vkCreateDescriptorSetLayout(
@@ -352,16 +357,16 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
         };
-        VkDescriptorPoolCreateInfo pool_info{
-            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        VkDescriptorPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         pool_info.maxSets = 1;
         pool_info.poolSizeCount = 2;
         pool_info.pPoolSizes = pool_sizes;
         if (!vk_ok(vkCreateDescriptorPool(m->device, &pool_info, nullptr,
                                            &m->descriptor_pool)))
                 return m->fail("Cannot create Vulkan descriptor pool");
-        VkDescriptorSetAllocateInfo set_info{
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        VkDescriptorSetAllocateInfo set_info{};
+        set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         set_info.descriptorPool = m->descriptor_pool;
         set_info.descriptorSetCount = 1;
         set_info.pSetLayouts = &m->descriptor_layout;
@@ -371,8 +376,8 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
 
         VkPushConstantRange push_range{VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                        sizeof(uint32_t) * 2};
-        VkPipelineLayoutCreateInfo pipeline_layout_info{
-            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayoutCreateInfo pipeline_layout_info{};
+        pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipeline_layout_info.setLayoutCount = 1;
         pipeline_layout_info.pSetLayouts = &m->descriptor_layout;
         pipeline_layout_info.pushConstantRangeCount = 1;
@@ -380,8 +385,8 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
         if (!vk_ok(vkCreatePipelineLayout(m->device, &pipeline_layout_info,
                                            nullptr, &m->pipeline_layout)))
                 return m->fail("Cannot create Vulkan pipeline layout");
-        VkShaderModuleCreateInfo shader_info{
-            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        VkShaderModuleCreateInfo shader_info{};
+        shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         shader_info.codeSize = r12l_vaapi_spv_len;
         shader_info.pCode =
             reinterpret_cast<const uint32_t *>(r12l_vaapi_spv);
@@ -389,9 +394,10 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
         if (!vk_ok(vkCreateShaderModule(m->device, &shader_info, nullptr,
                                          &shader)))
                 return m->fail("Cannot create Vulkan compute shader");
-        VkComputePipelineCreateInfo pipeline_info{
-            VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        pipeline_info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        VkComputePipelineCreateInfo pipeline_info{};
+        pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipeline_info.stage = {};
+        pipeline_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         pipeline_info.stage.module = shader;
         pipeline_info.stage.pName = "main";
@@ -402,22 +408,23 @@ r12l_vaapi_vulkan::init(int width, int height, void *va_display)
         if (!vk_ok(pipeline_status))
                 return m->fail("Cannot create Vulkan compute pipeline");
 
-        VkCommandPoolCreateInfo command_pool_info{
-            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        VkCommandPoolCreateInfo command_pool_info{};
+        command_pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         command_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         command_pool_info.queueFamilyIndex = m->queue_family;
         if (!vk_ok(vkCreateCommandPool(m->device, &command_pool_info, nullptr,
                                         &m->command_pool)))
                 return m->fail("Cannot create Vulkan command pool");
-        VkCommandBufferAllocateInfo command_info{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        VkCommandBufferAllocateInfo command_info{};
+        command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         command_info.commandPool = m->command_pool;
         command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         command_info.commandBufferCount = 1;
         if (!vk_ok(vkAllocateCommandBuffers(m->device, &command_info,
                                              &m->command)))
                 return m->fail("Cannot allocate Vulkan command buffer");
-        VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         if (!vk_ok(vkCreateFence(m->device, &fence_info, nullptr,
                                  &m->conversion_fence)))
                 return m->fail("Cannot create Vulkan conversion fence");
@@ -440,7 +447,8 @@ r12l_vaapi_vulkan::convert(const unsigned char *source,
                             source + y * source_stride, row);
         }
         if (!m->input_coherent) {
-                VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+                VkMappedMemoryRange range{};
+                range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
                 range.memory = m->input_memory;
                 range.size = VK_WHOLE_SIZE;
                 if (!vk_ok(vkFlushMappedMemoryRanges(m->device, 1, &range)))
@@ -451,12 +459,13 @@ r12l_vaapi_vulkan::convert(const unsigned char *source,
                 return false;
 
         vkResetCommandBuffer(m->command, 0);
-        VkCommandBufferBeginInfo begin{
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (!vk_ok(vkBeginCommandBuffer(m->command, &begin)))
                 return m->fail("Cannot begin Vulkan conversion");
-        VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barrier.srcAccessMask =
             m->output_initialized ? VK_ACCESS_MEMORY_READ_BIT : 0;
         barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -494,7 +503,8 @@ r12l_vaapi_vulkan::convert(const unsigned char *source,
                              nullptr, 0, nullptr, 1, &barrier);
         if (!vk_ok(vkEndCommandBuffer(m->command)))
                 return m->fail("Cannot end Vulkan conversion");
-        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &m->command;
         if (!vk_ok(vkResetFences(m->device, 1, &m->conversion_fence)) ||

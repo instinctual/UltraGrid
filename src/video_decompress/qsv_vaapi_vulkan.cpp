@@ -152,11 +152,12 @@ struct converter {
 
         bool initialize()
         {
-                VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+                VkApplicationInfo app{};
+                app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
                 app.pApplicationName = "UltraGrid QSV R10k";
                 app.apiVersion = VK_API_VERSION_1_2;
-                VkInstanceCreateInfo instance_info{
-                    VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+                VkInstanceCreateInfo instance_info{};
+                instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
                 instance_info.pApplicationInfo = &app;
                 if (!vk_ok(vkCreateInstance(&instance_info, nullptr,
                                              &instance)))
@@ -196,8 +197,8 @@ struct converter {
                         return fail("No Vulkan compute queue");
 
                 float priority = 1.0F;
-                VkDeviceQueueCreateInfo queue_info{
-                    VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+                VkDeviceQueueCreateInfo queue_info{};
+                queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
                 queue_info.queueFamilyIndex = queue_family;
                 queue_info.queueCount = 1;
                 queue_info.pQueuePriorities = &priority;
@@ -226,8 +227,8 @@ struct converter {
                 if (has_external_host)
                         extensions.push_back(
                             VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
-                VkDeviceCreateInfo device_info{
-                    VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+                VkDeviceCreateInfo device_info{};
+                device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
                 device_info.queueCreateInfoCount = 1;
                 device_info.pQueueCreateInfos = &queue_info;
                 device_info.enabledExtensionCount = extensions.size();
@@ -243,10 +244,11 @@ struct converter {
                             "vkGetMemoryHostPointerPropertiesEXT"));
                 if (has_external_host &&
                     get_memory_host_pointer_properties != nullptr) {
-                        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host{
-                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
-                        VkPhysicalDeviceProperties2 properties{
-                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+                        VkPhysicalDeviceExternalMemoryHostPropertiesEXT host{};
+                        host.sType =
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+                        VkPhysicalDeviceProperties2 properties{};
+                        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
                         properties.pNext = &host;
                         vkGetPhysicalDeviceProperties2(physical, &properties);
                         external_host_alignment =
@@ -255,8 +257,8 @@ struct converter {
                             external_host_alignment != 0;
                 }
 
-                VkBufferCreateInfo buffer_info{
-                    VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                VkBufferCreateInfo buffer_info{};
+                buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
                 buffer_info.size = output_size;
                 buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
                 buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -277,8 +279,8 @@ struct converter {
                 output_coherent =
                     (memory_props.memoryTypes[type].propertyFlags &
                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0U;
-                VkMemoryAllocateInfo allocation{
-                    VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                VkMemoryAllocateInfo allocation{};
+                allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
                 allocation.allocationSize = requirements.size;
                 allocation.memoryTypeIndex = type;
                 if (!vk_ok(vkAllocateMemory(device, &allocation, nullptr,
@@ -294,8 +296,8 @@ struct converter {
                                VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
                 bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-                VkDescriptorSetLayoutCreateInfo layout_info{
-                    VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+                VkDescriptorSetLayoutCreateInfo layout_info{};
+                layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
                 layout_info.bindingCount = 2;
                 layout_info.pBindings = bindings;
                 if (!vk_ok(vkCreateDescriptorSetLayout(
@@ -305,16 +307,16 @@ struct converter {
                     {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
                     {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
                 };
-                VkDescriptorPoolCreateInfo pool_info{
-                    VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+                VkDescriptorPoolCreateInfo pool_info{};
+                pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
                 pool_info.maxSets = 1;
                 pool_info.poolSizeCount = 2;
                 pool_info.pPoolSizes = pool_sizes;
                 if (!vk_ok(vkCreateDescriptorPool(device, &pool_info, nullptr,
                                                    &descriptor_pool)))
                         return fail("Cannot create Vulkan descriptor pool");
-                VkDescriptorSetAllocateInfo set_info{
-                    VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+                VkDescriptorSetAllocateInfo set_info{};
+                set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
                 set_info.descriptorPool = descriptor_pool;
                 set_info.descriptorSetCount = 1;
                 set_info.pSetLayouts = &descriptor_layout;
@@ -324,8 +326,8 @@ struct converter {
 
                 VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                          sizeof(uint32_t)};
-                VkPipelineLayoutCreateInfo pipeline_layout_info{
-                    VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+                VkPipelineLayoutCreateInfo pipeline_layout_info{};
+                pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
                 pipeline_layout_info.setLayoutCount = 1;
                 pipeline_layout_info.pSetLayouts = &descriptor_layout;
                 pipeline_layout_info.pushConstantRangeCount = 1;
@@ -334,8 +336,8 @@ struct converter {
                         device, &pipeline_layout_info, nullptr,
                         &pipeline_layout)))
                         return fail("Cannot create Vulkan pipeline layout");
-                VkShaderModuleCreateInfo shader_info{
-                    VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+                VkShaderModuleCreateInfo shader_info{};
+                shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
                 shader_info.codeSize = qsv_vaapi_spv_len;
                 shader_info.pCode =
                     reinterpret_cast<const uint32_t *>(qsv_vaapi_spv);
@@ -343,10 +345,10 @@ struct converter {
                 if (!vk_ok(vkCreateShaderModule(device, &shader_info, nullptr,
                                                  &shader)))
                         return fail("Cannot create Vulkan shader");
-                VkComputePipelineCreateInfo pipeline_info{
-                    VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-                pipeline_info.stage = {
-                    VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+                VkComputePipelineCreateInfo pipeline_info{};
+                pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+                pipeline_info.stage = {};
+                pipeline_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
                 pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
                 pipeline_info.stage.module = shader;
                 pipeline_info.stage.pName = "main";
@@ -357,23 +359,23 @@ struct converter {
                 if (!vk_ok(pipeline_result))
                         return fail("Cannot create Vulkan compute pipeline");
 
-                VkCommandPoolCreateInfo pool{
-                    VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+                VkCommandPoolCreateInfo pool{};
+                pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
                 pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
                 pool.queueFamilyIndex = queue_family;
                 if (!vk_ok(vkCreateCommandPool(device, &pool, nullptr,
                                                 &command_pool)))
                         return fail("Cannot create Vulkan command pool");
-                VkCommandBufferAllocateInfo command_info{
-                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                VkCommandBufferAllocateInfo command_info{};
+                command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
                 command_info.commandPool = command_pool;
                 command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
                 command_info.commandBufferCount = 1;
                 if (!vk_ok(vkAllocateCommandBuffers(device, &command_info,
                                                      &command)))
                         return fail("Cannot allocate Vulkan command buffer");
-                VkFenceCreateInfo fence_info{
-                    VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                VkFenceCreateInfo fence_info{};
+                fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
                 if (!vk_ok(vkCreateFence(device, &fence_info, nullptr,
                                          &conversion_fence)))
                         return fail("Cannot create Vulkan conversion fence");
@@ -397,12 +399,12 @@ struct converter {
 
                 direct_output item{};
                 item.pointer = destination;
-                VkExternalMemoryBufferCreateInfo external{
-                    VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+                VkExternalMemoryBufferCreateInfo external{};
+                external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
                 external.handleTypes =
                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
-                VkBufferCreateInfo info{
-                    VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                VkBufferCreateInfo info{};
+                info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
                 info.pNext = &external;
                 info.size = output_size;
                 info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -413,8 +415,8 @@ struct converter {
                 VkMemoryRequirements requirements{};
                 vkGetBufferMemoryRequirements(device, item.buffer,
                                               &requirements);
-                VkMemoryHostPointerPropertiesEXT host{
-                    VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+                VkMemoryHostPointerPropertiesEXT host{};
+                host.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
                 if (!vk_ok(get_memory_host_pointer_properties(
                         device,
                         VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
@@ -431,13 +433,13 @@ struct converter {
                         vkDestroyBuffer(device, item.buffer, nullptr);
                         return {};
                 }
-                VkImportMemoryHostPointerInfoEXT import{
-                    VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+                VkImportMemoryHostPointerInfoEXT import{};
+                import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
                 import.handleType =
                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
                 import.pHostPointer = destination;
-                VkMemoryAllocateInfo allocation{
-                    VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                VkMemoryAllocateInfo allocation{};
+                allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
                 allocation.pNext = &import;
                 allocation.allocationSize = requirements.size;
                 allocation.memoryTypeIndex = type;
@@ -491,19 +493,20 @@ struct converter {
                 plane.offset = desc.layers[0].offset[0];
                 plane.rowPitch = desc.layers[0].pitch[0];
                 plane.size = desc.objects[0].size;
-                VkImageDrmFormatModifierExplicitCreateInfoEXT modifier{
-                    VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT};
+                VkImageDrmFormatModifierExplicitCreateInfoEXT modifier{};
+                modifier.sType =
+                    VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
                 modifier.drmFormatModifier =
                     desc.objects[0].drm_format_modifier;
                 modifier.drmFormatModifierPlaneCount = 1;
                 modifier.pPlaneLayouts = &plane;
-                VkExternalMemoryImageCreateInfo external{
-                    VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+                VkExternalMemoryImageCreateInfo external{};
+                external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
                 external.pNext = &modifier;
                 external.handleTypes =
                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-                VkImageCreateInfo image_info{
-                    VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+                VkImageCreateInfo image_info{};
+                image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
                 image_info.pNext = &external;
                 image_info.imageType = VK_IMAGE_TYPE_2D;
                 image_info.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
@@ -532,18 +535,18 @@ struct converter {
                         close_fds();
                         return fail("No Vulkan memory type for Y410 DMA-BUF");
                 }
-                VkMemoryDedicatedAllocateInfo dedicated{
-                    VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+                VkMemoryDedicatedAllocateInfo dedicated{};
+                dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
                 dedicated.image = item.image;
-                VkImportMemoryFdInfoKHR import{
-                    VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+                VkImportMemoryFdInfoKHR import{};
+                import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
                 import.pNext = &dedicated;
                 import.handleType =
                     VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
                 import.fd = desc.objects[0].fd;
                 desc.objects[0].fd = -1;
-                VkMemoryAllocateInfo allocation{
-                    VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+                VkMemoryAllocateInfo allocation{};
+                allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
                 allocation.pNext = &import;
                 allocation.allocationSize = requirements.size;
                 allocation.memoryTypeIndex = type;
@@ -563,8 +566,8 @@ struct converter {
                         return fail("Vulkan cannot import Y410 DMA-BUF");
                 }
                 close_fds();
-                VkImageViewCreateInfo view{
-                    VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+                VkImageViewCreateInfo view{};
+                view.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
                 view.image = item.image;
                 view.viewType = VK_IMAGE_VIEW_TYPE_2D;
                 view.format = image_info.format;
@@ -620,13 +623,13 @@ struct converter {
                 update_descriptor(direct);
                 last_direct_output = direct != VK_NULL_HANDLE;
                 vkResetCommandBuffer(command, 0);
-                VkCommandBufferBeginInfo begin{
-                    VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                VkCommandBufferBeginInfo begin{};
+                begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
                 begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 if (!vk_ok(vkBeginCommandBuffer(command, &begin)))
                         return fail("Cannot begin Vulkan conversion");
-                VkImageMemoryBarrier acquire{
-                    VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                VkImageMemoryBarrier acquire{};
+                acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                 acquire.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
                 acquire.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
                 acquire.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -653,8 +656,8 @@ struct converter {
                                    sizeof parameter, &parameter);
                 vkCmdDispatch(command, (width + 15U) / 16U,
                               (height + 15U) / 16U, 1);
-                VkMemoryBarrier output_barrier{
-                    VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                VkMemoryBarrier output_barrier{};
+                output_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
                 output_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
                 output_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
                 vkCmdPipelineBarrier(command,
@@ -672,7 +675,8 @@ struct converter {
                                      nullptr, 0, nullptr, 1, &release);
                 if (!vk_ok(vkEndCommandBuffer(command)))
                         return fail("Cannot end Vulkan conversion");
-                VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                VkSubmitInfo submit{};
+                submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                 submit.commandBufferCount = 1;
                 submit.pCommandBuffers = &command;
                 if (!vk_ok(vkResetFences(device, 1, &conversion_fence)) ||
@@ -682,8 +686,8 @@ struct converter {
                                            VK_TRUE, UINT64_MAX)))
                         return fail("Vulkan conversion submission failed");
                 if (!direct && !output_coherent) {
-                        VkMappedMemoryRange range{
-                            VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+                        VkMappedMemoryRange range{};
+                        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
                         range.memory = output_memory;
                         range.size = VK_WHOLE_SIZE;
                         if (!vk_ok(vkInvalidateMappedMemoryRanges(
