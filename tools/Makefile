@@ -16,6 +16,7 @@ ifeq ($(ARCH), x86_64)
 endif
 
 TARGETS=astat_lib astat_test benchmark_ff_convs convert decklink_temperature \
+	drm_connector_config \
 	mux_ivf \
 	thumbnailgen uyvy2yuv422p
 
@@ -61,6 +62,10 @@ convert: convert.o $(COMMON_OBJS)
 
 decklink_temperature: decklink_temperature.cpp ext-deps/DeckLink/Linux/DeckLinkAPIDispatch.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
+
+drm_connector_config: drm_connector_config.cpp
+	$(CXX) $(CXXFLAGS) $(shell pkg-config --cflags libdrm) $^ -o $@ \
+		$(shell pkg-config --libs libdrm)
 
 mux_ivf: mux_ivf.o
 	$(CC) $(CFLAGS) $^ -o $@

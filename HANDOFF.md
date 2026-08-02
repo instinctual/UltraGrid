@@ -6,8 +6,8 @@ Last updated: 2026-08-01 (America/Los_Angeles)
 
 - Current checkout: `/home/administrator/UltraGrid`
 - Current branch: `master`
-- Latest implementation commit: `e907a7ecb` — Recover DeckLink format
-  detection after signal loss
+- Latest implementation commit: `00224702b` — Eliminate the Vulkan receiver
+  frame copy
 - Organization remote: `instinctual` (`https://github.com/instinctual/UltraGrid.git`)
 - Upstream remote: `origin` (`https://github.com/CESNET/UltraGrid.git`)
 - Local `master` tracks `instinctual/master`.
@@ -29,19 +29,87 @@ Recent commits:
 | Role | Host | SSH user | Runtime unit |
 |---|---|---|---|
 | Encoder | `10.55.118.88` | `administrator` | `ultragrid-sender.service` |
-| Receiver | `10.55.118.89` | `administrator` | `ultragrid-receiver.service` |
+| DeckLink receiver | `10.55.118.89` | `administrator` | `ultragrid-receiver.service` |
+| Cage/HDMI receiver | `10.55.118.91` | `administrator` | `ultragrid-cage-receiver.service` |
 
 Credentials are intentionally not stored in this repository. Obtain them
 through the operator or the normal secret-management mechanism.
 
-Both runtime services are transient systemd units created with `systemd-run`.
-They use `Restart=on-failure` and `RestartSec=1s`.
+The encoder and DeckLink receiver runtime services are transient systemd units
+created with `systemd-run`. They use `Restart=on-failure` and `RestartSec=1s`.
 
 Both machines currently run the watchdog build at
 `/usr/local/bin/uv-r12l-identity`. Its SHA-256 matches the local binary:
 `7f9097fbfb9b1ebd6220823f0d8503a377bc6881c22aac225c83e4da0c34604e`.
 The previously installed binary was retained on each machine as
 `/tmp/uv-r12l-identity.pre-watchdog` for short-term rollback.
+
+## Cage/HDMI receiver
+
+The new receiver at `10.55.118.91` uses Ubuntu 26.04 Desktop, Intel DRM,
+patched Cage 0.2.1, SDL3 Wayland, and the UltraGrid Vulkan display. The
+deployment files and complete build, installation, verification, format-test,
+and rollback instructions are in
+`contrib/cage-kiosk/README.md`.
+
+The production `ultragrid-cage-receiver.service` is installed, enabled, and
+starts successfully after an unattended reboot; `gdm.service` is disabled.
+Deployed SHA-256 values:
+
+- `/usr/local/bin/uv-vulkan-sdl3`:
+  `5506664e08d98f296889c776354af19b7db42fd676ab87f16f492a381c5e9662`
+- `/usr/local/bin/cage-ultragrid-10bit`:
+  `db503f34afe68e43d27120f9f492ef9611ce8bddaf7a566d2207edd7f8f75a9f`
+
+The path is intentionally strict:
+
+- patched Cage requires an `XR30` or `XB30` 10-bit render/scanout format and
+  refuses an 8-bit fallback;
+- `ug-drm-connector-config` discovers the connected DRM output and sets
+  `Broadcast RGB=Full` by property and enum names;
+- VSync remains enabled;
+- PipeWire playback follows the default sink instead of a numeric node ID,
+  which is not stable across reboots;
+- both the UltraGrid playback stream and default HDMI sink run at `1.0` unity
+  gain; the kiosk wrapper reapplies sink unity at every start;
+- Vulkan receives decoded `R10k` directly through the optimized QSV/VA path;
+  and
+- `vulkan:...:modeset` uses wlroots output management to select the EDID mode
+  matching each incoming UltraGrid description.
+
+Mode selection requires one enabled output, an exact incoming width/height,
+and the closest EDID-advertised refresh. True interlaced input uses field rate;
+PsF uses frame rate. It avoids renegotiation if the correct mode is already
+current. Two explicit fallbacks preserve compatibility with consumer HDMI
+sinks: 2048x1080 DCI uses 1920x1080 HD when 2K DCI is absent, and 4096x2160
+DCI uses 3840x2160 UHD when 4K DCI is absent. Vulkan centers and letterboxes
+the DCI image instead of stretching it.
+
+During live validation, an incoming 3840x2160p24 stream automatically changed
+the physical output from its EDID-preferred 1920x1080p60 timing to
+3840x2160p24. The active primary-plane framebuffer remained `XB30`, and
+`Broadcast RGB=Full` verified after the change. Earlier scope validation
+confirmed 10-bit only after restarting the complete Cage unit following an
+HDMI/EDID-chain change; restarting UltraGrid alone is insufficient for that
+case.
+
+After the final unattended reboot, the receiver again selected
+3840x2160p24, verified `Broadcast RGB=Full`, routed the UltraGrid stream to
+the current HDMI default sink, and reported `1.00` volume for both the stream
+and sink. The service remained active with zero automatic restarts.
+
+The kiosk needs `PAMName=login` to create an active logind seat at unattended
+boot. PAM moves Cage and UltraGrid into a login-session cgroup, so unmodified
+Cage can wait indefinitely for UltraGrid during shutdown. The second included
+Cage patch signals its primary client with `SIGINT` before waiting. The unit
+also enables linger for `administrator`, starts `user@1000.service` for
+PipeWire, uses `SIGINT` for clean shutdown, and routes output to the journal so
+repeated/dropped/late-frame counters are observable remotely.
+
+The attached Sony EDID advertises 4096x2160 DCI but not 2048x1080 DCI. Test
+UHD, HD, 720p, true interlace, fractional rates, 2K DCI fallback, and exact 4K
+DCI as described in the kiosk README. Validate every case on the HDMI scope
+for bit depth and range, not only from the Vulkan swapchain format.
 
 ## Signal and codec path
 

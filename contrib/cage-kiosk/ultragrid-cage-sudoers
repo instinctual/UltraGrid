@@ -1,0 +1,12 @@
+Cmnd_Alias ULTRAGRID_KIOSK_SERVICES = \
+    /usr/bin/systemctl start ultragrid-cage-receiver.service, \
+    /usr/bin/systemctl stop ultragrid-cage-receiver.service, \
+    /usr/bin/systemctl restart ultragrid-cage-receiver.service, \
+    /usr/bin/systemctl start ultragrid-vulkan-receiver.service, \
+    /usr/bin/systemctl stop ultragrid-vulkan-receiver.service, \
+    /usr/bin/systemctl restart ultragrid-vulkan-receiver.service, \
+    /usr/bin/systemctl start gdm.service, \
+    /usr/bin/systemctl stop gdm.service, \
+    /usr/bin/systemctl restart gdm.service
+
+administrator ALL=(root) NOPASSWD: ULTRAGRID_KIOSK_SERVICES

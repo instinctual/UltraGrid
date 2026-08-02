@@ -1,0 +1,30 @@
+[Unit]
+Description=UltraGrid strict 10-bit Cage receiver kiosk
+After=network-online.target systemd-user-sessions.service user@1000.service
+Wants=network-online.target user@1000.service
+Conflicts=display-manager.service ultragrid-vulkan-receiver.service ultragrid-cage-test.service getty@tty1.service
+
+[Service]
+Type=simple
+User=administrator
+SupplementaryGroups=video render audio input
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+UtmpIdentifier=tty1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WLR_BACKENDS=drm,libinput
+ExecStartPre=/usr/local/bin/ug-drm-connector-config
+ExecStart=/usr/local/bin/cage-ultragrid-10bit -D -d -m last -- /usr/local/libexec/ultragrid-cage-client
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=graphical.target

@@ -4,6 +4,7 @@ astat_test
 benchmark_ff_convs
 convert
 decklink_temperature
+drm_connector_config
 mux_ivf
 thumbnailgen
 uyvy2yuv422p

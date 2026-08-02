@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+# Cage starts its child after creating the Wayland socket, but output-management
+# publication can lag by a fraction of a second on some DRM devices.
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+        if wlr-randr >/dev/null 2>&1; then
+                break
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.1
+done
+
+if [ "$attempt" -eq 50 ]; then
+        echo "Cage did not expose wlr-output-management" >&2
+        exit 1
+fi
+
+# UltraGrid produces unity-gain samples. Keep the default HDMI sink at unity as
+# well; WirePlumber remembers this, and reapplying it handles sink recreation
+# after an HDMI/EDID renegotiation.
+if ! wpctl set-volume @DEFAULT_AUDIO_SINK@ 1.0; then
+        echo "Warning: could not set the default PipeWire sink to unity gain" >&2
+fi
+
+exec /usr/local/bin/uv-vulkan-sdl3 -4 -V \
+        -d vulkan:fs:modeset:gpu=integrated:display=0 \
+        -r pipewire \
+        --param decoder-use-codec=R10k \
+        --param decoder-drop-policy=blocking \
+        --param force-lavd-decoder=hevc_qsv \
+        --param low-latency-video

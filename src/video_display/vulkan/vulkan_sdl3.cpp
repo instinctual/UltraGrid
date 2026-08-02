@@ -42,6 +42,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <cctype>                                          // for toupper
 #include <cmath>                                           // for sqrt
 #include <condition_variable>
@@ -52,10 +53,15 @@
 #include <map>                                             // for map
 #include <memory>
 #include <mutex>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <sys/wait.h>
 #include <type_traits>
+#include <unistd.h>
 #include <utility> // pair
+#include <vector>
 
 #include "debug.h"
 #include "host.h"
@@ -170,6 +176,7 @@ struct state_vulkan_sdl3 {
         bool deinterlace = false;
         bool fullscreen = false;
         bool keep_aspect = false;
+        bool modeset = false;
 
         bool cursor_is_shown = true;
         enum show_cursor_t { SC_TRUE, SC_FALSE, SC_AUTOHIDE, SC_MODE_COUNT } show_cursor = SC_AUTOHIDE;
@@ -455,7 +462,7 @@ void show_help() {
 
         col() << "VULKAN_SDL3 options:\n";
         col() << SBOLD(SRED("\t-d vulkan")
-                        << "[:d|:fs|:keep-aspect|:[no]cursor|:nodecorate|:novsync|:tearing|:validation|:display=<d>|"
+                        << "[:d|:fs|:keep-aspect|:modeset|:[no]cursor|:nodecorate|:novsync|:tearing|:validation|:display=<d>|"
                         ":driver=<drv>|:gpu=<gpu_id>|:pos=<x>,<y>|:size=<W>x<H>|:window_flags=<f>|:help])") << "\n";
 
         col() << ("\twhere:\n");
@@ -464,6 +471,8 @@ void show_help() {
         col() << SBOLD("\t              fs") << " - fullscreen\n";
 
         col() << SBOLD("\t     keep-aspect") << " - keep window aspect ratio respective to the video\n";
+        col() << SBOLD("\t         modeset") << " - match a single wlroots output mode to the incoming video"
+                                                    " (DCI falls back to HD/UHD)\n";
         col() << SBOLD("\t      [no]cursor") << " - force show/hide cursor (default is autohide when not moving)\n";
         col() << SBOLD("\t      nodecorate") << " - disable window border\n";
         col() << SBOLD("\t         novsync") << " - disable vsync\n";
@@ -544,18 +553,231 @@ vkd::ImageDescription to_vkd_image_desc(const video_desc& ultragrid_desc, state_
         return { ultragrid_desc.width, ultragrid_desc.height, iter->vulkan_format };
 }
 
+struct WlrMode {
+        unsigned width = 0;
+        unsigned height = 0;
+        double refresh = 0.0;
+        bool current = false;
+};
+
+struct WlrOutput {
+        std::string name;
+        bool enabled = false;
+        std::vector<WlrMode> modes;
+};
+
+bool run_wlr_randr(const std::vector<std::string>& arguments, std::string* output = nullptr) {
+        int pipe_fds[2] = {-1, -1};
+        if (output != nullptr && pipe(pipe_fds) != 0) {
+                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Cannot create wlr-randr output pipe: %s\n",
+                        strerror(errno));
+                return false;
+        }
+
+        const pid_t pid = fork();
+        if (pid == -1) {
+                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Cannot start wlr-randr: %s\n",
+                        strerror(errno));
+                if (output != nullptr) {
+                        close(pipe_fds[0]);
+                        close(pipe_fds[1]);
+                }
+                return false;
+        }
+        if (pid == 0) {
+                if (output != nullptr) {
+                        close(pipe_fds[0]);
+                        if (dup2(pipe_fds[1], STDOUT_FILENO) == -1) {
+                                _exit(126);
+                        }
+                        close(pipe_fds[1]);
+                }
+                std::vector<char*> argv;
+                argv.reserve(arguments.size() + 2);
+                argv.push_back(const_cast<char*>("wlr-randr"));
+                for (const auto& argument : arguments) {
+                        argv.push_back(const_cast<char*>(argument.c_str()));
+                }
+                argv.push_back(nullptr);
+                execvp(argv[0], argv.data());
+                _exit(errno == ENOENT ? 127 : 126);
+        }
+
+        if (output != nullptr) {
+                close(pipe_fds[1]);
+                output->clear();
+                std::array<char, 4096> buffer{};
+                while (true) {
+                        const ssize_t count = read(pipe_fds[0], buffer.data(), buffer.size());
+                        if (count > 0) {
+                                output->append(buffer.data(), static_cast<size_t>(count));
+                        } else if (count == 0) {
+                                break;
+                        } else if (errno != EINTR) {
+                                log_msg(LOG_LEVEL_ERROR, MOD_NAME "Cannot read wlr-randr output: %s\n",
+                                        strerror(errno));
+                                break;
+                        }
+                }
+                close(pipe_fds[0]);
+        }
+
+        int status = 0;
+        while (waitpid(pid, &status, 0) == -1) {
+                if (errno != EINTR) {
+                        log_msg(LOG_LEVEL_ERROR, MOD_NAME "Cannot wait for wlr-randr: %s\n",
+                                strerror(errno));
+                        return false;
+                }
+        }
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                const int exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                log_msg(LOG_LEVEL_ERROR,
+                        MOD_NAME "wlr-randr failed (exit %d); :modeset requires a Cage/wlroots "
+                                 "session with wlr-output-management and wlr-randr installed.\n",
+                        exit_status);
+                return false;
+        }
+        return true;
+}
+
+std::vector<WlrOutput> parse_wlr_randr_output(const std::string& text) {
+        std::vector<WlrOutput> outputs;
+        WlrOutput* current_output = nullptr;
+        std::istringstream lines(text);
+        std::string line;
+        while (std::getline(lines, line)) {
+                if (!line.empty() && line.back() == '\r') {
+                        line.pop_back();
+                }
+                if (line.empty()) {
+                        continue;
+                }
+                if (!std::isspace(static_cast<unsigned char>(line.front()))) {
+                        const size_t name_end = line.find_first_of(" \t");
+                        WlrOutput output;
+                        output.name = line.substr(0, name_end);
+                        outputs.push_back(std::move(output));
+                        current_output = &outputs.back();
+                        continue;
+                }
+                if (current_output == nullptr) {
+                        continue;
+                }
+                const size_t content_start = line.find_first_not_of(" \t");
+                if (content_start == std::string::npos) {
+                        continue;
+                }
+                const std::string_view content(line.data() + content_start,
+                                               line.size() - content_start);
+                if (content == "Enabled: yes") {
+                        current_output->enabled = true;
+                        continue;
+                }
+
+                WlrMode mode;
+                int parsed = 0;
+                if (sscanf(content.data(), "%ux%u px, %lf Hz%n", &mode.width, &mode.height,
+                           &mode.refresh, &parsed) == 3) {
+                        mode.current = content.substr(static_cast<size_t>(parsed)).find("(current)") !=
+                                       std::string_view::npos;
+                        current_output->modes.push_back(mode);
+                }
+        }
+        return outputs;
+}
+
+bool match_wlroots_output_mode(const video_desc& desc) {
+        std::string listing;
+        if (!run_wlr_randr({}, &listing)) {
+                return false;
+        }
+        const auto outputs = parse_wlr_randr_output(listing);
+        std::vector<const WlrOutput*> enabled_outputs;
+        for (const auto& output : outputs) {
+                if (output.enabled) {
+                        enabled_outputs.push_back(&output);
+                }
+        }
+        if (enabled_outputs.size() != 1) {
+                log_msg(LOG_LEVEL_ERROR,
+                        MOD_NAME ":modeset requires exactly one enabled wlroots output; found %zu.\n",
+                        enabled_outputs.size());
+                return false;
+        }
+
+        const WlrOutput& output = *enabled_outputs.front();
+        const bool interlaced = desc.interlacing == UPPER_FIELD_FIRST ||
+                                desc.interlacing == LOWER_FIELD_FIRST ||
+                                desc.interlacing == INTERLACED_MERGED;
+        const double wanted_refresh = desc.fps * (interlaced ? 2.0 : 1.0);
+        auto find_closest_mode = [&](unsigned width, unsigned height) {
+                const WlrMode* closest = static_cast<const WlrMode*>(nullptr);
+                double smallest_difference = std::numeric_limits<double>::max();
+                for (const auto& mode : output.modes) {
+                        if (mode.width != width || mode.height != height) {
+                                continue;
+                        }
+                        const double difference = std::abs(mode.refresh - wanted_refresh);
+                        if (difference < smallest_difference) {
+                                closest = &mode;
+                                smallest_difference = difference;
+                        }
+                }
+                return closest;
+        };
+
+        const WlrMode* selected = find_closest_mode(desc.width, desc.height);
+        if (selected == nullptr &&
+            ((desc.width == 2048 && desc.height == 1080) ||
+             (desc.width == 4096 && desc.height == 2160))) {
+                const unsigned fallback_width = desc.width == 2048 ? 1920 : 3840;
+                selected = find_closest_mode(fallback_width, desc.height);
+                if (selected != nullptr) {
+                        log_msg(LOG_LEVEL_NOTICE,
+                                MOD_NAME "Output %s has no %ux%u EDID mode; using %ux%u for DCI "
+                                         "input while preserving image aspect ratio.\n",
+                                output.name.c_str(), desc.width, desc.height, fallback_width,
+                                desc.height);
+                }
+        }
+        if (selected == nullptr) {
+                log_msg(LOG_LEVEL_ERROR,
+                        MOD_NAME "Output %s has no EDID mode for incoming %ux%u %.3f Hz%s.\n",
+                        output.name.c_str(), desc.width, desc.height, wanted_refresh,
+                        interlaced ? " (field rate)" : "");
+                return false;
+        }
+        if (selected->current) {
+                log_msg(LOG_LEVEL_INFO, MOD_NAME "Output %s is already %ux%u @ %.6f Hz.\n",
+                        output.name.c_str(), selected->width, selected->height, selected->refresh);
+                return true;
+        }
+
+        char mode_argument[80];
+        snprintf(mode_argument, sizeof mode_argument, "%ux%u@%.6fHz", selected->width,
+                 selected->height, selected->refresh);
+        log_msg(LOG_LEVEL_NOTICE,
+                MOD_NAME "Matching output %s to incoming video: %s (requested %.3f Hz).\n",
+                output.name.c_str(), mode_argument, wanted_refresh);
+        return run_wlr_randr({"--output", output.name, "--mode", mode_argument});
+}
+
 
 bool display_vulkan_reconfigure(void* state, video_desc desc) {
         auto* s = static_cast<state_vulkan_sdl3*>(state);
         assert(s->magic == magic_vulkan_sdl3);
 
         assert(desc.tile_count == 1);
-        s->current_desc = desc;
         if (!s->vulkan->is_image_description_supported(to_vkd_image_desc(desc, *s))){
                 log_msg(LOG_LEVEL_WARNING,
                         MOD_NAME "Video description is not supported - frames are too big or format isn't supported.");
                 return false;
         }
+        if (s->modeset && !match_wlroots_output_mode(desc)) {
+                return false;
+        }
+        s->current_desc = desc;
         return true;
 }
 
@@ -628,6 +850,8 @@ bool parse_cfg(command_line_arguments& args, state_vulkan_sdl3& s, std::string_v
                         s.fullscreen = true;
                 } else if(key == "keep-aspect" && val.empty()){
                         s.keep_aspect = true;
+                } else if(key == "modeset" && val.empty()){
+                        s.modeset = true;
                 } else if(key == "cursor" && val.empty()){
                         s.show_cursor = state_vulkan_sdl3::SC_TRUE;
                 } else if(key == "nocursor" && val.empty()){

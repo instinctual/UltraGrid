@@ -1,0 +1,17 @@
+diff --git a/cage.c b/cage.c
+index 9b7c510..c9aa6fd 100644
+--- a/cage.c
++++ b/cage.c
+@@ -165,6 +165,12 @@ cleanup_primary_client(pid_t pid)
+ {
+ 	int status;
+ 
++	/*
++	 * Cage normally waits indefinitely for its client when the compositor is
++	 * terminated. Signal the kiosk client so systemd can stop a PAM-backed
++	 * login session cleanly.
++	 */
++	kill(pid, SIGINT);
+ 	waitpid(pid, &status, 0);
+ 
+ 	if (WIFEXITED(status)) {
