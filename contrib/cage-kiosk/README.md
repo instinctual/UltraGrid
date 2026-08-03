@@ -75,10 +75,10 @@ ninja -C "$workdir/cage/build"
 install -m 0755 "$workdir/cage/build/cage" /tmp/cage-ultragrid-10bit
 ```
 
-Keep this patched binary separate from the distribution's Cage package so a
-package update cannot silently replace the strict 10-bit behavior.
-The two patch files beside this README are retained as an offline reproducible
-fallback and for easy comparison with upstream.
+Keep this custom binary separate from the distribution's Cage package so a
+package update cannot silently replace the strict 10-bit behavior. The
+`instinctual/cage` repository and its `v0.2.1-ultragrid.1` tag are the sole
+source of the compositor modifications.
 
 ## Install the kiosk
 
@@ -107,9 +107,10 @@ argument, and the sudoers username before installation when deploying under a
 different account. Linger starts that user's systemd manager and PipeWire at
 boot without requiring an interactive desktop login. `PAMName=login` creates
 the active logind seat needed for unprivileged DRM access. PAM can move the
-kiosk into a login-session cgroup, so the second Cage patch explicitly signals
-UltraGrid during compositor shutdown; omitting that patch can make a service
-restart wait until `TimeoutStopSec=`.
+kiosk into a login-session cgroup, so the fork's `Terminate primary client on
+Cage shutdown` commit explicitly signals UltraGrid during compositor
+shutdown. Using a Cage build without that change can make a service restart
+wait until `TimeoutStopSec=`.
 
 The receiver command is in `ultragrid-cage-client`. It intentionally uses the
 default PipeWire sink rather than a numeric target ID, because PipeWire node
