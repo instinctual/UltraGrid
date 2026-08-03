@@ -9,6 +9,46 @@ and verifies the result. By default it requires exactly one connected output
 and sets `Broadcast RGB=Full`. Use `--device` and `--connector` to select an
 output explicitly on multi-output systems.
 
+ZeroTier UDP path probe
+-----------------------
+
+`zt_udp_probe` measures UDP loss at video-like rates without UltraGrid, SRT, or
+the codec. It can send either evenly paced packets or one burst per video frame.
+The receiver reports sequence loss, reordering, duplicates, kernel socket
+overflow, inter-arrival gaps, and the maximum packets received in one
+millisecond.
+
+Build it with:
+
+```
+make -C tools zt_udp_probe
+```
+
+Start a receiver on the relay:
+
+```
+./zt_udp_probe recv --bind :51000 --duration 35
+```
+
+Run the video-burst test through the relay's ZeroTier address:
+
+```
+./zt_udp_probe send --target 172.25.5.104:51000 --bitrate 60M \
+    --packet-size 1304 --fps 24 --pattern frame --burst-ms 8 --duration 30
+```
+
+Then repeat with a continuously paced stream:
+
+```
+./zt_udp_probe send --target 172.25.5.104:51000 --bitrate 60M \
+    --packet-size 1304 --pattern paced --duration 30
+```
+
+For a conclusive A/B comparison, repeat both commands with a routed non-ZeroTier
+address between the same two hosts. Keep bitrate, packet size, duration, and
+pattern unchanged. `--burst-ms 0` sends each entire encoded frame immediately;
+larger values spread a frame's packets across that many milliseconds.
+
 Astat
 -----
 
