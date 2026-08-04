@@ -18,7 +18,7 @@ endif
 TARGETS=astat_lib astat_test benchmark_ff_convs convert decklink_temperature \
 	drm_connector_config \
 	mux_ivf \
-	thumbnailgen uyvy2yuv422p zt_udp_probe
+	thumbnailgen uyvy2yuv422p
 
 COMMON_OBJS = src/color_space.o src/debug.o src/video_codec.o src/pixfmt_conv.o \
 	src/compat/aligned_malloc.o \
@@ -75,9 +75,6 @@ uyvy2yuv422p: uyvy2yuv422p.c
 
 thumbnailgen: thumbnailgen.o ipc_frame.o ipc_frame_unix.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ -ljpeg
-
-zt_udp_probe: zt_udp_probe.cpp
-	$(CXX) $(CXXFLAGS) $(FLAGS) -Wall -Wextra $^ -o $@
 
 clean:
 	$(RM) $(TARGETS) $(OBJS)

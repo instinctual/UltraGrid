@@ -1,6 +1,41 @@
 # UltraGrid R12L Streaming Handoff
 
-Last updated: 2026-08-02 (America/Los_Angeles)
+Last updated: 2026-08-03 (America/Los_Angeles)
+
+## 2026-08-03 production validation checkpoint
+
+- `/home/administrator/srtserver` is at release 0.3.6. Production relay
+  `172.25.5.100` runs that package and passes its health check.
+- Relay route `encoder04` and destination `receiver06` are enabled.
+  `preserveSourceTime` is disabled on both, preventing stale source timestamps
+  from poisoning a newly connected output socket.
+- Encoder `172.25.5.74` currently reaches the relay through the transient
+  `colorconnect-relay-encoder04-unrestricted.service`. Its SRT URI has no
+  `maxbw`, `inputbw`, or `oheadbw` cap, and sustained production traffic showed
+  zero sender loss and retransmissions.
+- After the clean ColorConnect install, `/opt/instinctual/colorconnect/encoder`
+  is absent on `172.25.5.74`. The enabled but inactive
+  `colorconnect-encoder.service` and `colorconnect-srttransmit.service` still
+  reference scripts below that missing directory. The working relay
+  transmitter is therefore not persistent across reboot yet.
+- The receiver at `172.25.5.6` runs the QSV recovery build at
+  `/usr/local/bin/uv`. Its SHA-256 is
+  `1bf6c3f1df8634ba4e1d1cef36d949ee23bd3e18d7ddb6a672b8a683f4f6810d`;
+  the previous binary is `/usr/local/bin/uv.pre-qsv-recovery`.
+- Hardware decoding now drops corrupt/incomplete RTP frames before QSV and
+  recreates the decoder in-process after a QSV input/output error. HEVC waits
+  for VPS plus an IRAP access unit, and H.264 waits for SPS plus IDR, before
+  resuming. This avoids exiting UltraGrid, an external decoder watchdog, or
+  permanently increasing SRT latency.
+- The relay fix plus the uncapped encoder path restored stable video. Receiver
+  sampling showed complete RTP windows at approximately 24 fps and no further
+  QSV GPU hangs.
+- The standalone UDP diagnostic now lives in
+  `/home/administrator/srtserver/tools/srt_udp_probe.cpp`; it has been removed
+  from this repository.
+
+The detailed relay release hashes, package checksums, deployed paths, tests,
+and version workflow are in `/home/administrator/srtserver/HANDOFF.md`.
 
 ## Repository state
 

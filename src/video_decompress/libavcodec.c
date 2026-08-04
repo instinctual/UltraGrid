@@ -96,6 +96,7 @@ struct state_libavcodec_decompress {
         };
         bool             block_accel[HWACCEL_COUNT];
         long long        consecutive_failed_decodes;
+        bool             decoder_reinit_pending;
 
         struct state_libavcodec_decompress_sws {
                 int width, height;
@@ -106,7 +107,8 @@ struct state_libavcodec_decompress {
 
         struct hw_accel_state hwaccel;
 
-        _Bool sps_vps_found; ///< to avoid initial error flood, start decoding after SPS (H.264) or VPS (HEVC) was received
+        _Bool    decoder_sync_found; ///< start/restart only at a decoder synchronization access unit
+        time_ns_t sync_wait_log_last;
 
         double    mov_avg_comp_duration;
         double    mov_avg_decode_duration;
@@ -131,12 +133,15 @@ struct state_libavcodec_decompress {
 
 static enum AVPixelFormat get_format_callback(struct AVCodecContext *s, const enum AVPixelFormat *fmt);
 
-static void deconfigure(struct state_libavcodec_decompress *s)
+static void
+deconfigure_internal(struct state_libavcodec_decompress *s, bool flush)
 {
         av_to_uv_conversion_destroy(&s->convert);
 
         if(s->codec_ctx) {
-                lavd_flush(s->codec_ctx);
+                if (flush) {
+                        lavd_flush(s->codec_ctx);
+                }
                 avcodec_free_context(&s->codec_ctx);
         }
         av_frame_free(&s->frame);
@@ -163,6 +168,12 @@ static void deconfigure(struct state_libavcodec_decompress *s)
         }
         av_frame_free(&s->sws.frame);
 #endif // defined HAVE_SWSCALE
+}
+
+static void
+deconfigure(struct state_libavcodec_decompress *s)
+{
+        deconfigure_internal(s, true);
 }
 
 static int check_av_opt_set(void *state, const char *key, const char *val) {
@@ -452,10 +463,18 @@ static bool configure_with(struct state_libavcodec_decompress *s,
         s->tmp_frame = av_frame_alloc();
         if (s->frame == NULL || s->tmp_frame == NULL) {
                 log_msg(LOG_LEVEL_ERROR, "[lavd] Unable allocate frame.\n");
+                deconfigure(s);
                 return false;
         }
 
         s->pkt = av_packet_alloc();
+        if (s->pkt == NULL) {
+                log_msg(LOG_LEVEL_ERROR, "[lavd] Unable allocate packet.\n");
+                deconfigure(s);
+                return false;
+        }
+
+        s->decoder_reinit_pending = false;
 
         return true;
 }
@@ -966,54 +985,73 @@ change_pixfmt(AVFrame *frame, unsigned char *dst, av_to_uv_convert_t *convert,
 }
 
 /**
- * This function handles beginning of H.264 stream that usually floods terminal
- * output with errors because it usually doesn't start with IDR frame (even if
- * it does, codec probing swallows this). As a workaround, we wait until first
- * SPS NAL unit to avoid initial decoding errors.
+ * Returns true if the Annex B access unit can synchronize a new decoder.
  *
- * A drawback may be that it can in theory happen that the SPS NAL unit is not
- * at the beginning of the buffer, but it is not the case of libx264 and
- * hopefully neither other decoders (if so, it needs to be reworked/removed).
+ * UltraGrid HEVC encoders may use intra refresh: such refresh access units
+ * begin with VPS/SPS/PPS but contain a TRAIL_R slice instead of IDR/CRA.
+ * Feeding an arbitrary P/B access unit into a newly-created hardware decoder
+ * context, however, can leave it in an unrecoverable state after packet loss.
  */
-static _Bool check_first_sps_vps(struct state_libavcodec_decompress *s, unsigned char *src, unsigned int src_len) {
-        if (s->sps_vps_found) {
-                return 1;
+static bool
+has_decoder_sync_nal(codec_t codec, const unsigned char *src,
+                     unsigned int src_len)
+{
+        const bool hevc = codec == H265;
+        const unsigned char *cursor = src;
+        const unsigned char *const end = src + src_len;
+
+        while (cursor < end) {
+                const unsigned char *nal_end = NULL;
+                const unsigned char *nal =
+                    rtpenc_get_next_nal(cursor, end - cursor, &nal_end);
+                if (nal == NULL) {
+                        return false;
+                }
+
+                const int type = NALU_HDR_GET_TYPE(nal, hevc);
+                if ((!hevc &&
+                     (type == NAL_H264_IDR || type == NAL_H264_SPS)) ||
+                    (hevc && type >= NAL_HEVC_CODED_SLC_FIRST &&
+                     type <= 23) ||
+                    (hevc && type == NAL_HEVC_VPS)) {
+                        return true;
+                }
+                cursor = nal_end;
         }
-        _Thread_local static time_ns_t t0;
-        if (t0 == 0) {
-                t0 = get_time_in_ns();
+        return false;
+}
+
+bool (*testable_lavd_has_decoder_sync_nal)(
+    codec_t, const unsigned char *, unsigned int) = has_decoder_sync_nal;
+
+static bool
+check_decoder_sync(struct state_libavcodec_decompress *s,
+                   const unsigned char *src, unsigned int src_len)
+{
+        if (s->decoder_sync_found) {
+                return true;
         }
-        if (get_time_in_ns() - t0 > 10 * NS_IN_SEC) { // after 10 seconds surrender and let decoder do the job
-                log_msg(LOG_LEVEL_WARNING, MOD_NAME "No SPS found, starting decode, anyway. Please report a bug to " PACKAGE_BUGREPORT " if decoding succeeds from now.\n");
-                s->sps_vps_found = 1;
-                return 1;
+        const bool hevc = s->desc.color_spec == H265;
+        if (has_decoder_sync_nal(s->desc.color_spec, src, src_len)) {
+                s->decoder_sync_found = true;
+                s->sync_wait_log_last = 0;
+                MSG(VERBOSE,
+                    "Decoder synchronization access unit received; decode "
+                    "will begin.\n");
+                return true;
         }
 
-        const unsigned char *const nal =
-            rtpenc_get_first_nal(src, src_len, s->desc.color_spec == H265);
-        if (nal == NULL) {
-                return 0;
+        const unsigned char *nal = rtpenc_get_first_nal(src, src_len, hevc);
+        const time_ns_t now = get_time_in_ns();
+        if (nal != NULL &&
+            now - s->sync_wait_log_last >= NS_IN_SEC) {
+                MSG(WARNING,
+                    "Got %s, waiting for a decoder synchronization access "
+                    "unit...\n",
+                    get_nalu_name(NALU_HDR_GET_TYPE(nal, hevc), hevc));
+                s->sync_wait_log_last = now;
         }
-        const bool hevc      = s->desc.color_spec == H265;
-        const int  nalu_type = NALU_HDR_GET_TYPE(nal, hevc);
-
-        if (hevc) {
-                if (nalu_type > NAL_HEVC_CODED_SLC_FIRST) {
-                        s->sps_vps_found = true;
-                }
-        } else {
-                if (nalu_type == NAL_H264_SPS) {
-                        s->sps_vps_found = true;
-                }
-        }
-        if (!s->sps_vps_found)  {
-                MSG(WARNING, "Got %s, waiting for first IDR NALU...\n",
-                    get_nalu_name(nalu_type, hevc));
-        } else {
-                MSG(VERBOSE, "Got %s, decode will begin...\n",
-                    get_nalu_name(nalu_type, hevc));
-        }
-        return s->sps_vps_found;
+        return false;
 }
 
 /// print hint to improve performance if not making it
@@ -1103,11 +1141,40 @@ static void check_duration(struct state_libavcodec_decompress *s, double duratio
         }
 }
 
+static bool
+is_qsv_decoder_name(const char *name)
+{
+        return name != NULL && strstr(name, "_qsv") != NULL;
+}
+
+static bool
+should_reinitialize_qsv(const char *decoder_name, int ret)
+{
+        return ret == AVERROR(EIO) && is_qsv_decoder_name(decoder_name);
+}
+
+bool (*testable_lavd_should_reinitialize_qsv)(const char *, int) =
+    should_reinitialize_qsv;
+
 static void
 handle_lavd_error(const char *prefix, struct state_libavcodec_decompress *s,
                   int ret)
 {
         print_decoder_error(prefix, ret);
+        const char *const decoder_name =
+            s->codec_ctx != NULL && s->codec_ctx->codec != NULL
+                ? s->codec_ctx->codec->name
+                : NULL;
+        if (should_reinitialize_qsv(decoder_name, ret)) {
+                if (!s->decoder_reinit_pending) {
+                        log_msg(LOG_LEVEL_ERROR,
+                                MOD_NAME
+                                "QSV device error; rebuilding the decoder "
+                                "context at the next random-access frame.\n");
+                }
+                s->decoder_reinit_pending = true;
+                return;
+        }
         if(ret == AVERROR(EIO)){
                 s->consecutive_failed_decodes++;
                 if(s->consecutive_failed_decodes > 70 && !s->block_accel[s->hwaccel.type]){
@@ -1184,7 +1251,40 @@ decode_frame(struct state_libavcodec_decompress *s, unsigned char *src,
                 NS_TO_SEC_DBL(receive_start - send_start);
         s->last_receive_duration =
                 NS_TO_SEC_DBL(receive_end - receive_start);
-        return frame_decoded;
+        return frame_decoded && !s->decoder_reinit_pending;
+}
+
+static void
+begin_decoder_reinitialization(struct state_libavcodec_decompress *s)
+{
+        // A failed hardware context must not be drained. Draining submits more
+        // work to the same broken device session and can produce another hang.
+        deconfigure_internal(s, false);
+        s->decoder_reinit_pending = true;
+        s->decoder_sync_found = false;
+        s->sync_wait_log_last = 0;
+}
+
+static bool
+reinitialize_decoder(struct state_libavcodec_decompress *s)
+{
+        if (!s->decoder_reinit_pending) {
+                return true;
+        }
+        if (!configure_with(s, s->desc, NULL, 0)) {
+                log_msg(LOG_LEVEL_ERROR,
+                        MOD_NAME
+                        "Unable to rebuild decoder context; waiting for the "
+                        "next random-access frame.\n");
+                deconfigure(s);
+                s->decoder_reinit_pending = true;
+                s->decoder_sync_found = false;
+                s->sync_wait_log_last = 0;
+                return false;
+        }
+        log_msg(LOG_LEVEL_NOTICE,
+                MOD_NAME "Decoder context rebuilt successfully.\n");
+        return true;
 }
 
 static decompress_status libavcodec_decompress(void *state, unsigned char *dst, unsigned char *src,
@@ -1199,9 +1299,13 @@ static decompress_status libavcodec_decompress(void *state, unsigned char *dst, 
                                         internal_props)) {
                         return DECODER_GOT_CODEC;
                 }
-                if (!check_first_sps_vps(s, src, src_len)) {
+                if (!check_decoder_sync(s, src, src_len)) {
                         return DECODER_NO_FRAME;
                 }
+        }
+
+        if (!reinitialize_decoder(s)) {
+                return DECODER_NO_FRAME;
         }
 
         if (libav_codec_has_extradata(s->desc.color_spec)) {
@@ -1219,6 +1323,9 @@ static decompress_status libavcodec_decompress(void *state, unsigned char *dst, 
         time_ns_t t0 = get_time_in_ns();
 
         if (!decode_frame(s, src, src_len)) {
+                if (s->decoder_reinit_pending) {
+                        begin_decoder_reinitialization(s);
+                }
                 log_msg(LOG_LEVEL_DEBUG, MOD_NAME "No frame was decoded!\n");
                 return DECODER_NO_FRAME;
         }
@@ -1363,16 +1470,38 @@ static decompress_status libavcodec_decompress(void *state, unsigned char *dst, 
 ADD_TO_PARAM("lavd-accept-corrupted",
                 "* lavd-accept-corrupted[=no]\n"
                 "  Pass corrupted frames to decoder. If decoder isn't error-resilient,\n"
-                "  may crash! Use \"no\" to disable even if enabled by default.\n");
-/// if not requesteed, disable just for MJPEG
+                "  it may crash. Disabled by default for hardware decoders and MJPEG;\n"
+                "  use the option without '=no' to override.\n");
+
 static bool
-accept_corrupted(const AVCodecContext *ctx)
+decoder_capabilities_use_hardware(unsigned int capabilities)
+{
+        unsigned int hardware_caps = 0U;
+#ifdef AV_CODEC_CAP_HARDWARE
+        hardware_caps |= AV_CODEC_CAP_HARDWARE;
+#endif
+#ifdef AV_CODEC_CAP_HYBRID
+        hardware_caps |= AV_CODEC_CAP_HYBRID;
+#endif
+        return (capabilities & hardware_caps) != 0U;
+}
+
+bool (*testable_lavd_decoder_capabilities_use_hardware)(unsigned int) =
+    decoder_capabilities_use_hardware;
+
+static bool
+accept_corrupted(const struct state_libavcodec_decompress *s)
 {
         const char *const val = get_commandline_param("lavd-accept-corrupted");
         if (val != NULL) {
                 return strcmp(val, "no") != 0;
         }
-        if (ctx == NULL || ctx->codec->id == AV_CODEC_ID_MJPEG) {
+        const AVCodecContext *ctx = s->codec_ctx;
+        if (ctx == NULL || ctx->codec == NULL ||
+            ctx->codec->id == AV_CODEC_ID_MJPEG ||
+            decoder_capabilities_use_hardware(ctx->codec->capabilities) ||
+            is_qsv_decoder_name(ctx->codec->name) ||
+            get_commandline_param("use-hw-accel") != NULL) {
                 return false;
         }
         return true;
@@ -1389,7 +1518,7 @@ static int libavcodec_decompress_get_property(void *state, int property, void *v
                         if (*len < sizeof(int)) {
                                 return false;
                         }
-                        *(int *) val = accept_corrupted(s->codec_ctx);
+                        *(int *) val = accept_corrupted(s);
                         *len = sizeof(int);
                         ret = true;
                         break;
