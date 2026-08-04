@@ -4,6 +4,9 @@ Last updated: 2026-08-03 (America/Los_Angeles)
 
 ## 2026-08-03 production validation checkpoint
 
+- UltraGrid recovery commit `03bd47a32` is pushed to
+  `instinctual/master`. SRT Server release commit `b912015` is pushed to
+  `origin/main`; both local branches matched their remotes before shutdown.
 - `/home/administrator/srtserver` is at release 0.3.6. Production relay
   `172.25.5.100` runs that package and passes its health check.
 - Relay route `encoder04` and destination `receiver06` are enabled.
@@ -33,6 +36,14 @@ Last updated: 2026-08-03 (America/Los_Angeles)
 - The standalone UDP diagnostic now lives in
   `/home/administrator/srtserver/tools/srt_udp_probe.cpp`; it has been removed
   from this repository.
+- `/home/administrator/colorconnect` branch `nextgen` matches
+  `origin/nextgen` at `cf2ac7b`; cap removal is commit `e293c36`. Its only
+  untracked items are a nested 184 MB UltraGrid build checkout and three
+  downloaded InfluxData archive-key files, which are installation artifacts
+  and were intentionally not committed.
+- The ColorConnect Git remote contains an embedded personal access token.
+  Rotate that credential and replace the remote with a credential-managed URL;
+  the token value is intentionally not recorded here.
 
 The detailed relay release hashes, package checksums, deployed paths, tests,
 and version workflow are in `/home/administrator/srtserver/HANDOFF.md`.
@@ -41,6 +52,8 @@ and version workflow are in `/home/administrator/srtserver/HANDOFF.md`.
 
 - Current checkout: `/home/administrator/UltraGrid`
 - Current branch: `master`
+- Current validated recovery commit: `03bd47a32` — Recover QSV decoding after
+  corrupted input
 - Latest deployed implementation commit: `609cd4b5c` — Harden Cage kiosk
   restart behavior
 - Organization remote: `instinctual` (`https://github.com/instinctual/UltraGrid.git`)
@@ -53,11 +66,11 @@ and version workflow are in `/home/administrator/srtserver/HANDOFF.md`.
 
 Recent commits:
 
-1. `609cd4b5c` — Harden Cage kiosk restart behavior
-2. `febb67675` — Add automatic 10-bit Cage kiosk output
-3. `00224702b` — Eliminate the Vulkan receiver frame copy
-4. `33e8f6efb` — Update streaming handoff after watchdog deployment
-5. `e907a7ecb` — Recover DeckLink format detection after signal loss
+1. `03bd47a32` — Recover QSV decoding after corrupted input
+2. `609cd4b5c` — Harden Cage kiosk restart behavior
+3. `febb67675` — Add automatic 10-bit Cage kiosk output
+4. `00224702b` — Eliminate the Vulkan receiver frame copy
+5. `33e8f6efb` — Update streaming handoff after watchdog deployment
 
 ## Machines
 
