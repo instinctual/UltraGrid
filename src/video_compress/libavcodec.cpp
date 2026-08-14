@@ -305,6 +305,13 @@ struct state_video_compress_libav {
 
         bool hwenc = false;
         AVFrame *hwframe = nullptr;
+#ifdef HWACC_VAAPI
+        // The Linux QSV device is derived from VA-API.  Keep the parent VA
+        // device and a VA mapping of the reusable QSV input frame alive so
+        // Vulkan can write the identity-mapped Y410 surface directly.
+        AVBufferRef *qsv_va_device = nullptr;
+        AVFrame *qsv_va_frame = nullptr;
+#endif
         std::unique_ptr<r12l_vaapi_opencl> r12l_gpu;
 #ifdef HAVE_R12L_VULKAN
         std::unique_ptr<r12l_vaapi_vulkan> r12l_vulkan;
@@ -844,6 +851,49 @@ fail:
 }
 #endif
 
+#ifdef HWACC_VAAPI
+static int
+qsv_init_from_vaapi(struct AVCodecContext *codec_ctx,
+                    enum AVPixelFormat sw_format, AVBufferRef **va_device_out)
+{
+        constexpr int pool_size = 20;
+        AVBufferRef *va_device = nullptr;
+        AVBufferRef *qsv_device = nullptr;
+        AVBufferRef *hw_frames_ctx = nullptr;
+
+        int ret = create_hw_device_ctx(AV_HWDEVICE_TYPE_VAAPI, &va_device);
+        if (ret < 0) {
+                goto fail;
+        }
+        ret = av_hwdevice_ctx_create_derived(&qsv_device,
+                                             AV_HWDEVICE_TYPE_QSV, va_device,
+                                             0);
+        if (ret < 0) {
+                print_libav_error(LOG_LEVEL_ERROR,
+                                  MOD_NAME "Unable to derive QSV device from VA-API",
+                                  ret);
+                goto fail;
+        }
+        ret = create_hw_frame_ctx(qsv_device, codec_ctx->width,
+                                  codec_ctx->height, AV_PIX_FMT_QSV,
+                                  sw_format, pool_size, &hw_frames_ctx);
+        if (ret < 0) {
+                goto fail;
+        }
+
+        codec_ctx->hw_frames_ctx = hw_frames_ctx;
+        *va_device_out = va_device;
+        av_buffer_unref(&qsv_device);
+        return 0;
+
+fail:
+        av_buffer_unref(&hw_frames_ctx);
+        av_buffer_unref(&qsv_device);
+        av_buffer_unref(&va_device);
+        return ret;
+}
+#endif
+
 void
 print_codec_supp_pix_fmts(const enum AVPixelFormat *const codec_pix_fmts)
 {
@@ -1070,12 +1120,70 @@ list<enum AVPixelFormat> get_requested_pix_fmts(codec_t in_codec,
         return { pixfmts, pixfmts + nb_fmts };
 }
 
+static void
+reset_hw_encoder_state(struct state_video_compress_libav *s)
+{
+#ifdef HAVE_R12L_VULKAN
+        s->r12l_vulkan.reset();
+#endif
+        s->r12l_gpu.reset();
+        av_frame_free(&s->r12l_gpu_frame);
+#ifdef HWACC_VAAPI
+        // qsv_va_frame is a mapping of hwframe and must be released first.
+        av_frame_free(&s->qsv_va_frame);
+        av_buffer_unref(&s->qsv_va_device);
+#endif
+        av_frame_free(&s->hwframe);
+        s->hwenc = false;
+}
+
+static bool
+init_r12l_identity_conversion(struct state_video_compress_libav *s,
+                              struct video_desc desc,
+                              [[maybe_unused]] void *va_display)
+{
+        s->r12l_gpu = std::make_unique<r12l_vaapi_opencl>();
+        if (!s->r12l_gpu->init(desc.width, desc.height)) {
+                MSG(ERROR, "OpenCL R12L conversion init failed: %s\n",
+                    s->r12l_gpu->error().c_str());
+                return false;
+        }
+        s->r12l_gpu_frame = av_frame_alloc();
+        if (s->r12l_gpu_frame == nullptr) {
+                MSG(ERROR, "Unable to allocate R12L conversion frame\n");
+                return false;
+        }
+        s->r12l_gpu_frame->format = AV_PIX_FMT_XV30LE;
+        s->r12l_gpu_frame->width = desc.width;
+        s->r12l_gpu_frame->height = desc.height;
+        if (av_frame_get_buffer(s->r12l_gpu_frame, 0) < 0) {
+                MSG(ERROR, "Unable to allocate OpenCL RGB10 staging frame\n");
+                return false;
+        }
+        MSG(INFO, "Using OpenCL GPU R12L -> identity Y410 conversion\n");
+#ifdef HAVE_R12L_VULKAN
+        if (va_display != nullptr) {
+                s->r12l_vulkan = std::make_unique<r12l_vaapi_vulkan>();
+                if (!s->r12l_vulkan->init(desc.width, desc.height,
+                                          va_display)) {
+                        MSG(WARNING,
+                            "Vulkan/DMABUF R12L conversion unavailable (%s); "
+                            "using staged OpenCL upload.\n",
+                            s->r12l_vulkan->error().c_str());
+                        s->r12l_vulkan.reset();
+                }
+        }
+#endif
+        return true;
+}
+
 static bool try_open_codec(struct state_video_compress_libav *s,
                            AVPixelFormat &pix_fmt,
                            struct video_desc desc,
                            codec_t ug_codec,
                            const AVCodec *codec)
 {
+        reset_hw_encoder_state(s);
         // avcodec_alloc_context3 allocates context and sets default value
         s->codec_ctx = avcodec_alloc_context3(codec);
         if (!s->codec_ctx) {
@@ -1085,9 +1193,14 @@ static bool try_open_codec(struct state_video_compress_libav *s,
 
         if (!set_codec_ctx_params(s, pix_fmt, desc, ug_codec)) {
                 avcodec_free_context(&s->codec_ctx);
-                s->codec_ctx = NULL;
                 return false;
         }
+
+        auto fail_codec_attempt = [&] {
+                reset_hw_encoder_state(s);
+                avcodec_free_context(&s->codec_ctx);
+                return false;
+        };
 
         log_msg(LOG_LEVEL_VERBOSE, "[lavc] Trying pixfmt: %s\n", av_get_pix_fmt_name(pix_fmt));
 #ifdef HWACC_VAAPI
@@ -1102,18 +1215,19 @@ static bool try_open_codec(struct state_video_compress_libav *s,
                 }
                 int ret = vaapi_init(s->codec_ctx, sw_format);
                 if (ret != 0) {
-                        avcodec_free_context(&s->codec_ctx);
-                        s->codec_ctx = NULL;
-                        return false;
+                        return fail_codec_attempt();
                 }
                 s->hwenc = true;
                 s->hwframe = av_frame_alloc();
-                av_hwframe_get_buffer(s->codec_ctx->hw_frames_ctx, s->hwframe, 0);
+                if (s->hwframe == nullptr ||
+                    av_hwframe_get_buffer(s->codec_ctx->hw_frames_ctx,
+                                          s->hwframe, 0) < 0) {
+                        MSG(ERROR, "Unable to allocate VA-API encoder frame\n");
+                        return fail_codec_attempt();
+                }
                 pix_fmt = sw_format;
                 if (desc.color_spec == R12L &&
                     sw_format == AV_PIX_FMT_XV30LE) {
-                        s->r12l_gpu = std::make_unique<r12l_vaapi_opencl>();
-#ifdef HAVE_R12L_VULKAN
                         auto *frames_ctx =
                             reinterpret_cast<AVHWFramesContext *>(
                                 s->codec_ctx->hw_frames_ctx->data);
@@ -1123,43 +1237,77 @@ static bool try_open_codec(struct state_video_compress_libav *s,
                         auto *va_device =
                             reinterpret_cast<AVVAAPIDeviceContext *>(
                                 device_ctx->hwctx);
-#endif
-                        if (!s->r12l_gpu->init(desc.width, desc.height)) {
-                                MSG(ERROR, "OpenCL/VA R12L conversion init failed: %s\n",
-                                    s->r12l_gpu->error().c_str());
-                                s->r12l_gpu.reset();
-                                avcodec_free_context(&s->codec_ctx);
-                                return false;
+                        if (!init_r12l_identity_conversion(
+                                s, desc, va_device->display)) {
+                                return fail_codec_attempt();
                         }
-                        s->r12l_gpu_frame = av_frame_alloc();
-                        s->r12l_gpu_frame->format = AV_PIX_FMT_XV30LE;
-                        s->r12l_gpu_frame->width = desc.width;
-                        s->r12l_gpu_frame->height = desc.height;
-                        if (av_frame_get_buffer(s->r12l_gpu_frame, 0) < 0) {
-                                MSG(ERROR, "Unable to allocate OpenCL RGB10 staging frame\n");
-                                avcodec_free_context(&s->codec_ctx);
-                                return false;
-                        }
-                        MSG(INFO, "Using OpenCL GPU R12L -> identity Y410 conversion\n");
-#ifdef HAVE_R12L_VULKAN
-                        s->r12l_vulkan =
-                            std::make_unique<r12l_vaapi_vulkan>();
-                        if (!s->r12l_vulkan->init(desc.width, desc.height,
-                                                  va_device->display)) {
-                                MSG(WARNING,
-                                    "Vulkan/DMABUF R12L conversion unavailable "
-                                    "(%s); using staged OpenCL upload.\n",
-                                    s->r12l_vulkan->error().c_str());
-                                s->r12l_vulkan.reset();
-                        } else {
-                                MSG(INFO, "Using Vulkan/DMABUF single-copy "
-                                          "R12L -> VAAPI conversion.\n");
-                        }
-#endif
                 }
                 log_msg(LOG_LEVEL_INFO, MOD_NAME "Using VA-API with sw format %s\n", av_get_pix_fmt_name(pix_fmt));
         }
+
+        if (pix_fmt == AV_PIX_FMT_QSV && desc.color_spec == R12L &&
+            strcmp(codec->name, "hevc_qsv") == 0) {
+                int ret = qsv_init_from_vaapi(s->codec_ctx,
+                                              AV_PIX_FMT_XV30LE,
+                                              &s->qsv_va_device);
+                if (ret < 0) {
+                        return fail_codec_attempt();
+                }
+                s->hwenc = true;
+                s->hwframe = av_frame_alloc();
+                if (s->hwframe == nullptr ||
+                    av_hwframe_get_buffer(s->codec_ctx->hw_frames_ctx,
+                                          s->hwframe, 0) < 0) {
+                        MSG(ERROR, "Unable to allocate QSV encoder frame\n");
+                        return fail_codec_attempt();
+                }
+
+                s->qsv_va_frame = av_frame_alloc();
+                if (s->qsv_va_frame == nullptr) {
+                        return fail_codec_attempt();
+                }
+                s->qsv_va_frame->format = AV_PIX_FMT_VAAPI;
+                ret = av_hwframe_map(s->qsv_va_frame, s->hwframe,
+                                     AV_HWFRAME_MAP_WRITE |
+                                         AV_HWFRAME_MAP_OVERWRITE |
+                                         AV_HWFRAME_MAP_DIRECT);
+                void *va_display = nullptr;
+                if (ret < 0) {
+                        print_libav_error(
+                            LOG_LEVEL_WARNING,
+                            MOD_NAME "Unable to map QSV input as a direct VA surface; using staged upload",
+                            ret);
+                        av_frame_free(&s->qsv_va_frame);
+                } else {
+                        auto *device_ctx = reinterpret_cast<AVHWDeviceContext *>(
+                            s->qsv_va_device->data);
+                        auto *va_device =
+                            reinterpret_cast<AVVAAPIDeviceContext *>(
+                                device_ctx->hwctx);
+                        va_display = va_device->display;
+                }
+                if (!init_r12l_identity_conversion(s, desc, va_display)) {
+                        return fail_codec_attempt();
+                }
+                pix_fmt = AV_PIX_FMT_XV30LE;
+#ifdef HAVE_R12L_VULKAN
+                const bool direct_qsv_surface = s->r12l_vulkan != nullptr;
+#else
+                const bool direct_qsv_surface = false;
 #endif
+                MSG(INFO, "Using QSV with identity Y410 input surfaces%s\n",
+                    direct_qsv_surface
+                        ? " through direct VA/Vulkan mapping"
+                        : " through staged upload");
+        }
+#endif
+        if (pix_fmt == AV_PIX_FMT_XV30LE && desc.color_spec == R12L &&
+            strcmp(codec->name, "hevc_qsv") == 0 && !s->r12l_gpu) {
+                if (!init_r12l_identity_conversion(s, desc, nullptr)) {
+                        return fail_codec_attempt();
+                }
+                MSG(INFO, "Using QSV with staged identity Y410 input\n");
+        }
 #ifdef HWACC_VULKAN
         if (pix_fmt == AV_PIX_FMT_VULKAN){
                 log_msg(LOG_LEVEL_NOTICE, "Trying vulkan\n");
@@ -1187,10 +1335,11 @@ static bool try_open_codec(struct state_video_compress_libav *s,
                 s->codec_ctx->color_primaries = AVCOL_PRI_BT709;
                 s->codec_ctx->color_trc = AVCOL_TRC_BT709;
         }
-        // QSV always converts to limited BT.601 but writes to metadata contents
-        // of AVCodecContex so set the attribs to correspond
+        // QSV converts actual RGB input to limited BT.601.  The R12L identity
+        // path supplies packed Y410 components instead, so no matrix is
+        // applied and the RGB/full-range identity metadata above must remain.
         if (strstr(codec->name, "_qsv") != nullptr &&
-            codec_is_a_rgb(desc.color_spec)) {
+            codec_is_a_rgb(desc.color_spec) && !s->r12l_gpu) {
                 s->codec_ctx->colorspace =
                     AVCOL_SPC_BT470BG; // or AVCOL_SPC_SMPTE170M?
                 s->codec_ctx->color_range = AVCOL_RANGE_MPEG;
@@ -1198,9 +1347,8 @@ static bool try_open_codec(struct state_video_compress_libav *s,
 
         /* open it */
         if (avcodec_open2(s->codec_ctx, codec, NULL) < 0) {
-                avcodec_free_context(&s->codec_ctx);
                 log_msg(LOG_LEVEL_ERROR, "[lavc] Could not open codec for pixel format %s\n", av_get_pix_fmt_name(pix_fmt));
-                return false;
+                return fail_codec_attempt();
         }
 
         return true;
@@ -1367,6 +1515,17 @@ static bool configure_with(struct state_video_compress_libav *s, struct video_de
         const AVPixelFormat *const codec_pix_fmts =
             avc_get_supported_pix_fmts(nullptr, codec);
         list<enum AVPixelFormat> requested_pix_fmt = get_requested_pix_fmts(desc.color_spec, s->req_conv_prop);
+#ifdef HWACC_VAAPI
+        // Prefer a hardware QSV frame backed by a VA Y410 surface for the
+        // private R12L identity workflow.  XV30 software input remains an
+        // explicit/fallback option, but would require a second upload.
+        if (desc.color_spec == R12L &&
+            strcmp(codec->name, "hevc_qsv") == 0 &&
+            get_commandline_param("lavc-use-codec") == nullptr) {
+                requested_pix_fmt.push_front(AV_PIX_FMT_XV30LE);
+                requested_pix_fmt.push_front(AV_PIX_FMT_QSV);
+        }
+#endif
         auto requested_pix_fmt_it = requested_pix_fmt.cbegin();
         set<AVPixelFormat> fmts_tried;
         while ((pix_fmt = get_first_matching_pix_fmt(
@@ -1720,10 +1879,15 @@ static shared_ptr<video_frame> libavcodec_compress_tile(void *state, shared_ptr<
                     vc_get_linesize(tx->tiles[0].width, R12L);
 #ifdef HAVE_R12L_VULKAN
                 if (s->r12l_vulkan) {
+                        const AVFrame *va_frame =
+#ifdef HWACC_VAAPI
+                            s->qsv_va_frame != nullptr ? s->qsv_va_frame :
+#endif
+                                                          s->hwframe;
                         const unsigned int surface =
                             static_cast<unsigned int>(
                                 reinterpret_cast<uintptr_t>(
-                                    s->hwframe->data[3]));
+                                    va_frame->data[3]));
                         already_on_hw_surface =
                             s->r12l_vulkan->convert(
                                 source, source_stride, surface);
@@ -1761,7 +1925,13 @@ static shared_ptr<video_frame> libavcodec_compress_tile(void *state, shared_ptr<
         debug_file_dump("lavc-avframe", serialize_video_avframe, frame);
 #ifdef HWACC_VAAPI
         if(s->hwenc && !already_on_hw_surface){
-                av_hwframe_transfer_data(s->hwframe, frame, 0);
+                const int ret = av_hwframe_transfer_data(s->hwframe, frame, 0);
+                if (ret < 0) {
+                        print_libav_error(LOG_LEVEL_ERROR,
+                                          MOD_NAME "Unable to upload encoder frame",
+                                          ret);
+                        return {};
+                }
                 frame = s->hwframe;
         }
 #endif
@@ -1829,12 +1999,7 @@ static void cleanup(struct state_video_compress_libav *s)
                 avcodec_free_context(&s->codec_ctx);
         }
 
-        s->r12l_gpu.reset();
-#ifdef HAVE_R12L_VULKAN
-        s->r12l_vulkan.reset();
-#endif
-        av_frame_free(&s->r12l_gpu_frame);
-        av_frame_free(&s->hwframe);
+        reset_hw_encoder_state(s);
 
 #ifdef HAVE_SWSCALE
         sws_freeContext(s->sws_ctx);
@@ -2225,10 +2390,33 @@ static void configure_qsv_h264_hevc(AVCodecContext *codec_ctx, struct setparam_p
         check_av_opt_set<const char *>(codec_ctx->priv_data, "scenario", "livestreaming");
         check_av_opt_set<int>(codec_ctx->priv_data, "async_depth", 1);
 
+        const bool identity_hevc =
+            strcmp(codec_ctx->codec->name, "hevc_qsv") == 0 &&
+            param->desc.color_spec == R12L &&
+            (param->av_pix_fmt == AV_PIX_FMT_QSV ||
+             param->av_pix_fmt == AV_PIX_FMT_XV30LE);
+        if (identity_hevc) {
+                // R12L is carried as packed Y410 (HEVC RExt/Main 4:4:4 10),
+                // not converted to a conventional YUV or RGB QSV surface.
+                check_av_opt_set<const char *>(codec_ctx->priv_data, "profile",
+                                               "rext");
+                check_av_opt_set<int>(codec_ctx->priv_data, "low_power", 1);
+                check_av_opt_set<int>(codec_ctx->priv_data, "gpb", 0);
+        }
+
         if (param->periodic_intra != 0) {
                 incomp_feature_warn(INCOMP_INTRA_REFRESH, param->periodic_intra);
                 check_av_opt_set<const char *>(codec_ctx->priv_data, "int_ref_type", "vertical");
-                check_av_opt_set<int>(codec_ctx->priv_data, "int_ref_cycle_size", 20);
+                const int cycle_size =
+                    codec_ctx->gop_size > 2
+                        ? std::min(20, codec_ctx->gop_size - 1)
+                        : 20;
+                check_av_opt_set<int>(codec_ctx->priv_data,
+                                      "int_ref_cycle_size", cycle_size);
+                check_av_opt_set<int>(codec_ctx->priv_data,
+                                      "int_ref_cycle_dist", cycle_size);
+                check_av_opt_set<int>(codec_ctx->priv_data,
+                                      "recovery_point_sei", 1);
         }
 
         if (param->desc.interlacing == INTERLACED_MERGED && param->interlaced_dct != 0) {

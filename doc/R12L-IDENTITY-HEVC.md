@@ -36,13 +36,16 @@ interpret the components as ordinary luma and chroma.
    value10 = round(value12 * 1023 / 4095)
    ```
 
-4. On Linux, VAAPI exports the encoder's Y410 surface as a DRM PRIME/DMABUF
-   object. Vulkan imports that object with its DRM format modifier, and a
-   compute shader writes `Y=G`, `U=B`, and `V=R` directly into the encoder
-   surface.
-5. VA-API encodes that hardware surface as HEVC Main 4:4:4 10. If DMABUF
-   sharing is unavailable, an OpenCL kernel produces an `XV30` software
-   surface followed by the normal VA-API hardware-frame upload.
+4. On Linux, either VA-API or QSV/oneVPL allocates the encoder's Y410 surface.
+   For QSV, UltraGrid derives the QSV device from VA-API and maps the reusable
+   QSV input frame back to the underlying VA surface.
+5. VA-API exports that surface as a DRM PRIME/DMABUF object. Vulkan imports
+   it with its DRM format modifier, and a compute shader writes `Y=G`, `U=B`,
+   and `V=R` directly into the encoder surface.
+6. The selected hardware API encodes the surface as HEVC Range Extensions
+   10-bit 4:4:4. If direct QSV/VA/Vulkan mapping is unavailable, an OpenCL
+   kernel produces an `XV30` software surface followed by the normal hardware
+   upload.
 
 Using an `XV30` software surface is deliberate. Supplying an RGB surface to
 the VA-API encoder can cause the driver to apply an RGB-to-YUV conversion.
@@ -90,6 +93,13 @@ components carry identity-mapped, full-range RGB.
 
 The path adds several controls used by the tested low-latency configuration:
 
+- QSV encoder asynchronous depth is set to one.
+- QSV encoder input uses video-memory Y410 surfaces rather than its internal
+  RGB conversion path.
+- QSV vertical intra-refresh is enabled by default unless
+  `disable_intra_refresh` is requested. The default refresh cycle is 20
+  frames, limited to one less than the configured GOP when a shorter GOP is
+  used. The cycle distance matches the cycle size.
 - QSV decoder asynchronous depth is set to one.
 - `--param low-latency-video` removes UltraGrid's default one-frame RTP video
   playout delay. This is suitable only for reliable, low-jitter networks.
@@ -124,11 +134,11 @@ than properties of the R12L transport.
 - The hardware codec must support HEVC 4:4:4 10-bit surfaces.
 - OpenCL is currently linked into the libavcodec compression and
   decompression modules when those modules are enabled.
-- The encoder avoids the intermediate software surface, GPU-to-CPU download,
-  and second upload when Vulkan can import the VAAPI Y410 DMABUF. DeckLink
-  capture is still CPU-addressable memory and must be copied once into
-  host-visible Vulkan input memory, so this is a single-copy encoder path
-  rather than end-to-end zero-copy.
+- Both VA-API and QSV encoders avoid the intermediate software surface,
+  GPU-to-CPU download, and second upload when Vulkan can import the Y410
+  DMABUF. DeckLink capture is still CPU-addressable memory and must be copied
+  once into host-visible Vulkan input memory, so this is a single-copy encoder
+  path rather than end-to-end zero-copy.
 - If Vulkan, VAAPI DMABUF export, the packed 10-bit storage-image format, or
   the surface's DRM modifier is unavailable, the encoder falls back to the
   staged OpenCL conversion.
@@ -144,9 +154,10 @@ The exact device identifiers and transport destination are site-specific.
 The essential video options are:
 
 ```sh
-# Sender
+# QSV sender with vertical intra-refresh
+QSV_VIDEO='libavcodec:encoder=hevc_qsv:rgb:depth=10:subsampling=444:bitrate=60000000:low_power=1:async_depth=1:slices=1:gop=24:intra_refresh'
 uv -t decklink:codec=R12L \
-   -c libavcodec:encoder=hevc_vaapi:rgb:depth=10:subsampling=444 \
+   -c "$QSV_VIDEO" \
    RECEIVER
 
 # Receiver
@@ -160,9 +171,20 @@ uv -d decklink:single-link:synchronized=3 \
 Bitrate, GOP structure, audio codec, and queue depths should be selected for
 the deployment rather than treated as part of the identity mapping itself.
 
+The previous VA-API encoder remains available as an immediate rollback:
+
+```sh
+VAAPI_VIDEO='libavcodec:encoder=hevc_vaapi:rgb:depth=10:subsampling=444:bitrate=60000000:low_power=1:async_depth=1:slices=1:gop=24:disable_intra_refresh'
+uv -t decklink:codec=R12L \
+   -c "$VAAPI_VIDEO" \
+   RECEIVER
+```
+
 ## Validation
 
 The implementation adds conversion coverage for `R12L` in the libavcodec
-conversion tests. It has also been exercised end-to-end with UHD 2160p24
-12-bit RGB DeckLink input, HEVC Main 4:4:4 10 hardware encoding, QSV hardware
-decoding, and single-link 4:4:4 DeckLink output.
+conversion tests. The QSV path has been exercised with UHD 2160p24 12-bit RGB
+DeckLink input, direct QSV/VA/Vulkan Y410 surfaces, HEVC RExt 10-bit 4:4:4
+encoding, vertical 20-frame intra-refresh, and QSV hardware decoding back to
+R10k. A local loopback soak sustained 24 fps with zero RTP loss; final HDMI
+and SDI scope validation must still be performed on a physical receiver.

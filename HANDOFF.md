@@ -1,6 +1,48 @@
 # UltraGrid R12L Streaming Handoff
 
-Last updated: 2026-08-03 (America/Los_Angeles)
+Last updated: 2026-08-14 (America/Los_Angeles)
+
+## 2026-08-14 QSV encoder development checkpoint
+
+- Development is on local branch `qsv`, created from `master` commit
+  `85ec45f8b`. The production `master` branch and VA-API runtime have not been
+  changed.
+- The R12L identity encoder can now use `hevc_qsv` with an `AV_PIX_FMT_QSV`
+  video-memory input frame. The QSV device is derived from VA-API, the QSV
+  frame is mapped to its underlying VA Y410 surface, and the existing Vulkan
+  shader writes `Y=G`, `U=B`, and `V=R` directly into that surface.
+- If direct QSV/VA/Vulkan mapping is unavailable, the encoder falls back to
+  OpenCL identity conversion into a software `XV30` frame and QSV's normal
+  upload. The fallback was forced with `--param lavc-use-codec=xv30le` and
+  sustained UHD 2160p24.
+- The QSV identity path explicitly requests HEVC RExt, low-power encoding,
+  async depth one, and Full-range RGB/identity VUI metadata. It avoids the
+  generic QSV RGB-to-limited-BT.601 handling.
+- QSV vertical intra-refresh is enabled with `intra_refresh`. The tested
+  configuration reports `IntRefType=1`, `IntRefCycleSize=20`, and
+  `IntRefCycleDist=20`; GOP remains 24 for the same one-second IDR recovery
+  boundary as the VA-API configuration.
+- Encoder hardware validation on `encoderTest` / `10.55.118.88` used Intel
+  media runtime 26.1.2 and oneVPL implementation 2.16. Direct QSV encoding
+  sustained UHD 2160p24 with a 13.77 ms average encode path, essentially the
+  same as the 13.75 ms VA-API baseline and well inside the 41.67 ms frame
+  budget.
+- A 32-second local loopback test ran QSV encode and QSV decode concurrently:
+  the receiver selected `xv30le`, used direct QSV/VA/Vulkan Y410-to-R10k
+  conversion, sustained 24 fps, and received 16,144,768/16,144,768 RTP
+  packets with zero loss. No encode, decode, or GPU errors occurred.
+- Remaining required validation is visual/scope testing through a physical
+  receiver: picture/color identity, Full range, 10-bit output, audio sync,
+  SDI format transitions (HD, UHD, 2K DCI, and 4K DCI fallback behavior),
+  receiver join, packet-loss recovery, and an extended soak. A new test
+  receiver is being prepared; do not declare the QSV branch production-ready
+  until those tests pass.
+
+Current QSV sender video configuration:
+
+```text
+-c libavcodec:encoder=hevc_qsv:rgb:depth=10:subsampling=444:bitrate=60000000:low_power=1:async_depth=1:slices=1:gop=24:intra_refresh
+```
 
 ## 2026-08-03 production validation checkpoint
 
