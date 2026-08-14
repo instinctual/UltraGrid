@@ -181,6 +181,8 @@ class VideoDelegate final : public IDeckLinkInputCallback
                 bmdDetectedVideoInput12BitDepth
         };
         BMDDetectedVideoInputFormatFlags configuredCsBitDepth{};
+        BMDTimeValue videoTimestampOffset{};
+        bool videoTimestampRebasePending{};
 
       public:
         int                           newFrameReady{}; // -1 == timeout
@@ -227,6 +229,10 @@ class VideoDelegate final : public IDeckLinkInputCallback
         HRESULT STDMETHODCALLTYPE
         VideoInputFrameArrived(IDeckLinkVideoInputFrame  *videoFrame,
                                IDeckLinkAudioInputPacket *audioPacket) override;
+        void RequestVideoTimestampRebase()
+        {
+                videoTimestampRebasePending = true;
+        }
 };
 
 struct device_state {
@@ -432,6 +438,7 @@ VideoDelegate::VideoInputFormatChanged(
                        "EnableVideoInput");
         device.currentDisplayMode = mode->GetDisplayMode();
         device.currentPixelFormat = pf;
+        RequestVideoTimestampRebase();
         deckLinkInput->FlushStreams();
         deckLinkInput->StartStreams();
 
@@ -469,9 +476,28 @@ VideoDelegate::VideoInputFrameArrived (IDeckLinkVideoInputFrame *videoFrame, IDe
 			// printf("Frame received (#%lu) - Valid Frame (Size: %li bytes)\n", framecount, videoFrame->GetRowBytes() * videoFrame->GetHeight());
 		}
 
-                BMDTimeValue unused_duration = 0;
-                videoFrame->GetStreamTime(&frameTime, &unused_duration,
+                BMDTimeValue rawFrameTime = 0;
+                BMDTimeValue unusedDuration = 0;
+                videoFrame->GetStreamTime(&rawFrameTime, &unusedDuration,
                                           s->frameRateScale);
+                if (videoTimestampRebasePending && device.audio &&
+                    audioPacket != nullptr && !nosig) {
+                        BMDTimeValue audioTime = 0;
+                        if (audioPacket->GetPacketTime(
+                                &audioTime, s->frameRateScale) == S_OK) {
+                                videoTimestampOffset =
+                                    audioTime - rawFrameTime;
+                                videoTimestampRebasePending = false;
+                                LOG(LOG_LEVEL_NOTICE)
+                                    << MOD_NAME
+                                    << "Rebased video timestamp to embedded "
+                                       "audio after input restart (offset "
+                                    << videoTimestampOffset * 1000.0 /
+                                           s->frameRateScale
+                                    << " ms).\n";
+                        }
+                }
+                frameTime = rawFrameTime + videoTimestampOffset;
         }
 
         if (audioPacket && !nosig) {
@@ -1891,6 +1917,7 @@ recover_decklink_no_signal(struct vidcap_decklink_state *s)
                             << bmd_hresult_to_string(result) << "\n";
                         continue;
                 }
+                device.delegate->RequestVideoTimestampRebase();
                 result = device.deckLinkInput->StartStreams();
                 if (FAILED(result)) {
                         LOG(LOG_LEVEL_ERROR)

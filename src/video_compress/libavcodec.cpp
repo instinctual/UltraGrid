@@ -1951,6 +1951,12 @@ static shared_ptr<video_frame> libavcodec_compress_tile(void *state, shared_ptr<
         time_ns_t t2 = get_time_in_ns();
 
         /* encode the image */
+        frame->pict_type = AV_PICTURE_TYPE_NONE;
+        if (s->params.periodic_intra != 0 && s->codec_ctx->gop_size > 0 &&
+            strcmp(s->codec_ctx->codec->name, "hevc_qsv") == 0 &&
+            s->cur_pts % s->codec_ctx->gop_size == 0) {
+                frame->pict_type = AV_PICTURE_TYPE_I;
+        }
         frame->pts = s->cur_pts++;
         store_metadata(s, tx.get(), frame->pts);
         if (int ret = avcodec_send_frame(s->codec_ctx, frame)) {
@@ -2406,6 +2412,11 @@ static void configure_qsv_h264_hevc(AVCodecContext *codec_ctx, struct setparam_p
 
         if (param->periodic_intra != 0) {
                 incomp_feature_warn(INCOMP_INTRA_REFRESH, param->periodic_intra);
+                // Cyclic intra refresh suppresses QSV's normal GOP-boundary
+                // random-access pictures. Honour explicitly requested I
+                // pictures as IDRs so a decoder can discard damaged reference
+                // state after packet loss while retaining the refresh cycle.
+                check_av_opt_set<int>(codec_ctx->priv_data, "forced_idr", 1);
                 check_av_opt_set<const char *>(codec_ctx->priv_data, "int_ref_type", "vertical");
                 const int cycle_size =
                     codec_ctx->gop_size > 2
