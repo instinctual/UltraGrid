@@ -544,3 +544,123 @@ service command lines.
 The repository move to `/home/administrator/UltraGrid` is complete. A normal
 incremental build and the full test suite passed from this location; no
 autotools regeneration was required.
+
+## 2026-08-14 pre-reboot checkpoint
+
+This is the current checkpoint and supersedes the older deferred-QSV notes
+above where they conflict.
+
+### Repository state
+
+- UltraGrid branch `qsv` is at pushed commit `62b46e9b0` (`Recover QSV
+  streams after input disruption`) before this HANDOFF update and the final
+  merge to `master`. The QSV encoder retains vertical cyclic intra-refresh
+  and forces an IDR at every configured GOP boundary so corrupted pictures
+  recover. DeckLink capture timestamps are rebased after input/timeline
+  discontinuities. The existing VA-API encoder remains available; QSV was
+  added as another encoder path and still uses VA-API for Linux surface/device
+  interoperability.
+- SRT Server source is clean on `main` at pushed commit `e5c3d4c` (`Release
+  0.3.41 isolate relay telemetry`), tracking `origin/main`. The older 0.3.34
+  deployment details below are a historical validation checkpoint, not a
+  claim about the currently installed relay package.
+- ColorConnect `/home/administrator/colorconnect2` is clean for tracked files
+  on `main` at pushed commit `f616049` (`Harden SRT startup and NIC
+  buffering`). That commit:
+  - persists the physical NIC transmit queue length at 10,000 packets through
+    `fix_rings.sh`;
+  - uses `${SRTUDPRECBUF}` for the local UltraGrid UDP input and appends
+    `${SRTUDPSENDBUF}` to the encoder's SRT destination URI; and
+  - installs a shared, stability-gated latency measurement for encoder,
+    receiver, and legacy relay roles, with deterministic regression coverage.
+- The ColorConnect latency helper rejects lossy/malformed ping windows,
+  discards a clean warm-up window, requires three consecutive consistent
+  zero-loss windows, and selects their median RTT. Live encoder validation
+  selected 9 ms from a 2.599 ms median at the configured 3.5 multiplier.
+- ColorConnect currently has unrelated generated untracked artifacts under
+  `common/install_modules/UltraGrid/` and
+  `common/install_modules/telegraf/influxdata-archive.key`; they were not
+  included in the requested source commits.
+
+### Encoder service and command state
+
+- This host is `encoderTest`, physical address `10.55.118.88`, ZeroTier
+  address `172.25.5.74`.
+- `colorconnect-encoder.service` is active but **disabled**. It will not start
+  automatically after reboot unless it is enabled or started manually.
+- The current UltraGrid command is QSV HEVC 10-bit 4:4:4 at 60 Mb/s with
+  vertical intra-refresh, a 20-frame refresh cycle, recovery-point SEI, GOP
+  24, eight embedded SDI audio channels, and Opus at 192 kb/s:
+
+  ```text
+  uv -m 1344 -l auto -t decklink:codec=R12L:passthrough:nosig-send -c libavcodec:encoder=hevc_qsv:low_power=1:async_depth=1:slices=1:intra_refresh:int_ref_type=vertical:int_ref_cycle_size=20:int_ref_cycle_dist=20:recovery_point_sei=1:gop=24:rgb:depth=10:subsampling=444:bitrate=60M:gop=24 -s embedded --audio-capture-format channels=8 --audio-codec=Opus:bitrate=192k -P 40000
+  ```
+- After reboot, the transient 30 ms test unit disappeared and the normal
+  `colorconnect-srttransmit.service` became active. It was then upgraded to
+  the stability-gated latency helper and validated live at 9 ms with
+  `payloadsize=1316` and `udpsndbuf=16777216`. The deployed session
+  configuration sets `SRTUDPSENDBUF="&udpsndbuf=16777216"` and the deployed
+  script consumes it. The repository sample still defaults this variable to
+  1 MiB; that sample default was not changed in this checkpoint.
+
+### Persistent physical NIC tuning
+
+- Encoder NIC `enp86s0` is live with RX/TX hardware rings at their 4096
+  maximums and Linux transmit queue length 10,000.
+- The settings are persistent through the active systemd link drop-in:
+
+  ```text
+  /etc/systemd/network/10-netplan-enp86s0.link.d/50-colorconnect-rings.conf
+  ```
+
+  containing:
+
+  ```ini
+  [Link]
+  RxBufferSize=max
+  TxBufferSize=max
+  TransmitQueueLength=10000
+  ```
+
+### ZeroTier socket experiment is deliberately deferred
+
+- Persistent sysctl ceilings on both encoder and relay are:
+
+  ```ini
+  net.core.rmem_max = 33554432
+  net.core.wmem_max = 33554432
+  net.core.netdev_max_backlog = 4096
+  ```
+
+- During diagnosis, every existing physical UDP socket owned by
+  `zerotier-one` on the encoder and relay was live-resized by requesting
+  16 MiB for both `SO_RCVBUF` and `SO_SNDBUF`. Linux reports the doubled
+  bookkeeping value of 32 MiB (`rb33554432`, `tb33554432`). The temporary
+  pidfd-based helper is `/tmp/set-process-socket-buffer` and is not an
+  installed deployment component.
+- The user explicitly chose to skip making this ZeroTier socket change
+  persistent. There is no ZeroTier systemd override on either machine.
+  Restarting ZeroTier or rebooting recreates its sockets with ZeroTier's
+  normal requested buffer size; do not silently reinstall the live patch.
+- Relay ZeroTier interface `ztkse3dx6t` was also live-set to transmit queue
+  length 10,000, but no persistent systemd link configuration or service
+  override was found for it. Expect this live-only value to reset on relay
+  reboot.
+- ZeroTier socket drop counters shown by `ss -uapnme` are cumulative for the
+  lifetime of the socket. A large `d` value alone does not prove current loss;
+  sample it twice and check whether it increases.
+
+### Transport conclusions to preserve
+
+- Encoder-to-receiver direct SRT over the ZeroTier addresses was stable. The
+  earlier severe relay-path loss was strongly affected by relay backpressure,
+  burst handling, and an encoder bandwidth cap below the real short-term
+  source rate. Production SRT bandwidth caps were removed.
+- `udpsndbuf` is local to each SRT endpoint. The encoder's setting cannot be
+  inherited from the relay, and a relay-side setting only changes sockets
+  owned by the relay.
+- Keep UltraGrid `-m 1344` paired with SRT `payloadsize=1316` for this
+  ZeroTier path.
+- Do not replace proper decoder recovery with an external UltraGrid watcher,
+  process exit, or permanently high SRT latency. The QSV forced-IDR and
+  discontinuity-handling work is the intended in-process recovery mechanism.
