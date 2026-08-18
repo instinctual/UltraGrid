@@ -48,6 +48,14 @@ Last updated: 2026-08-17 (America/Los_Angeles)
   merge. Physical encoder, DeckLink receiver, Cage/PipeWire receiver, SDI
   interruption, color/range, audio-sync, and soak testing are still required
   before merging `catchup` into `master`.
+- Deferred DeckLink latency experiment: compare the known-good
+  `--param low-latency-video` plus `synchronized=3` receiver against a receiver
+  with the parameter removed plus `synchronized=2`. The latter restores one
+  frame of RTP playout delay while removing one frame of minimum DeckLink
+  scheduling depth. Measure end-to-end A/V latency and require late, dropped,
+  repeated, dismissed, scheduling-failure, and audio-underflow counters to
+  remain flat after startup. The earlier rejected `synchronized=2` experiment
+  still had `low-latency-video` enabled, so it did not test this tradeoff.
 
 ## 2026-08-14 QSV encoder development checkpoint
 
