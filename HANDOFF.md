@@ -1,6 +1,53 @@
 # UltraGrid R12L Streaming Handoff
 
-Last updated: 2026-08-14 (America/Los_Angeles)
+Last updated: 2026-08-17 (America/Los_Angeles)
+
+## 2026-08-17 CESNET upstream catchup checkpoint
+
+- Work is on branch `catchup`, pushed to `instinctual/catchup` at merge commit
+  `97a2c1393` (`Merge CESNET master into catchup`). It was created from our
+  production `master` commit `4fe234f8f`. **Do not treat this as merged or
+  deployed:** `master` remains unchanged and `catchup` still requires live
+  encoder/receiver validation.
+- `catchup` merges CESNET `origin/master` through `b037a0c57` (2026-08-14).
+  At this checkpoint it is zero commits behind that upstream ref and 25
+  commits ahead, counting our 24 pre-existing commits plus the merge commit.
+- The sole merge conflict was `src/rxtx/ultragrid_rtp.c`. It was resolved by
+  retaining our `--param low-latency-video` zero-frame RTP playout option while
+  also taking upstream's atomic exit flag and asynchronous-send race fixes.
+- The most relevant upstream correctness fixes now included are:
+  - `72ca09588`: lock the UDP receiver exit flag;
+  - `3d5a18204`: make the UltraGrid RTP exit flag atomic;
+  - `8063ceb50`: remove the asynchronous RTP sender exit race;
+  - `e886981fc`: avoid dereferencing a missing decoder output frame;
+  - `6d34a1c8f`: initialize the reported incoming-format string; and
+  - `cd15100a1`: eliminate the asynchronous RTP sender's per-frame allocation.
+- DeckLink and audio timing changes (`acea14db9`, `8f7295eb4`, `6a1eaa198`,
+  `9b4e9a1c4`, and `c9ec8bd8d`) use monotonic clocks. They improve diagnostic
+  timing and make DeckLink `drift_fix` robust against wall-clock changes, but
+  they do not otherwise change audio gain, latency, or synchronization.
+- The PipeWire changes around `bba997f77` are defensive RAII/event-structure
+  cleanup. They do not fix sink selection, gain, or the earlier missing
+  WirePlumber/session-manager failure. Removing compatibility for PipeWire
+  older than 0.3.49 is acceptable for the supported Ubuntu 24.04/26.04 hosts.
+- CESNET's explicit R12L/Y416 fake-conversion filters and generic Y416
+  conversions are included but are not used by our production direct
+  QSV/Vulkan identity path. If that experimental postprocess is evaluated,
+  first fix `state_vopp_y416_to_r12l_fake::full_range`: upstream allocates the
+  state with `malloc()` and does not initialize the field on the default path.
+  Also remember that the fake filters default to limited-range scaling;
+  `:full-range` is required for bit-identity behavior.
+- The merged tree compiled successfully with `make -j8`. `make check` passed
+  codec conversions, QSV hardware-recovery logic, capture/display discovery,
+  IPv4 loopback/unicast, and the remaining unit tests. The multicast networking
+  cases failed because this workstation has no multicast loopback route; this
+  is an environment limitation, not an observed catchup regression.
+- Preservation checks confirmed that the custom QSV R12L identity encoder,
+  cyclic intra-refresh, decoder recovery, Vulkan/Cage modesetting, DeckLink
+  signal-loss recovery, and `low-latency-video` code remain present after the
+  merge. Physical encoder, DeckLink receiver, Cage/PipeWire receiver, SDI
+  interruption, color/range, audio-sync, and soak testing are still required
+  before merging `catchup` into `master`.
 
 ## 2026-08-14 QSV encoder development checkpoint
 
