@@ -155,7 +155,6 @@ constexpr int PADDING = MAX_PADDING;
 
 using namespace std::string_literals;
 using std::chrono::duration_cast;
-using std::chrono::high_resolution_clock;
 using std::chrono::nanoseconds;
 using std::chrono::seconds;
 using std::chrono::steady_clock;
@@ -179,7 +178,7 @@ struct state_video_decoder;
  * Interlacing changing function prototype. The function should be able to change buffer
  * in place, that is when dst and src are the same.
  */
-typedef void (*change_il_t)(char *dst, char *src, int linesize, int height, void **state);
+using change_il_t = void (*)(char *dst, char *src, int linesize, int height, void **state);
 
 // prototypes
 static bool reconfigure_decoder(struct state_video_decoder *decoder,
@@ -193,11 +192,10 @@ static void decoder_process_message(struct module *);
 static bool  video_decoder_register_display(struct state_video_decoder *decoder,
                                             struct display             *display);
 
-static int sum_map(map<int, int> const & m) {
+static int sum_map(const map<int, int>& m) {
         int ret = 0;
-        for (map<int, int>::const_iterator it = m.begin();
-                        it != m.end(); ++it) {
-                ret += it->second;
+        for (auto [pos, len] : m) {
+                ret += len;
         }
         return ret;
 }
@@ -266,8 +264,7 @@ struct reported_statistics_cumul {
                 }
                 last_buffer_number = buffer_number;
                 const auto now = steady_clock::now();
-                if (duration_cast<seconds>(now - t_last).count() >
-                    CUMULATIVE_REPORTS_INTERVAL) {
+                if (now - t_last > std::chrono::seconds(CUMULATIVE_REPORTS_INTERVAL)) {
                         print();
                         t_last = now;
                 }
@@ -611,7 +608,7 @@ static void *decompress_worker(void *data)
                         (unsigned char *) d->compressed->tiles[d->pos].data,
                         d->compressed->tiles[d->pos].data_len,
                         d->buffer_num,
-                        &decoder->frame->callbacks,
+                        decoder->frame ? &decoder->frame->callbacks : nullptr,
                         &d->internal_prop);
         return d;
 }
@@ -651,7 +648,7 @@ static void *decompress_thread(void *args) {
                         break;
                 }
 
-                auto t0 = std::chrono::high_resolution_clock::now();
+                auto t0 = steady_clock::now();
                 unique_ptr<char[]> tmp;
 
                 if (decoder->out_codec == VIDEO_CODEC_END) {
@@ -713,7 +710,7 @@ static void *decompress_thread(void *args) {
                 }
 
                 LOG(LOG_LEVEL_DEBUG) << MOD_NAME << "Decompress duration: " <<
-                        duration_cast<nanoseconds>(high_resolution_clock::now() - t0).count() / 1000000.0 << " ms\n";
+                        std::chrono::duration<double, std::milli>(steady_clock::now() - t0).count() << " ms\n";
 
                 if(decoder->change_il) {
                         for(unsigned int i = 0; i < decoder->frame->tile_count; ++i) {
@@ -1072,8 +1069,8 @@ static vector<pair<struct pixfmt_desc, codec_t>> video_decoder_order_output_code
 
         if (log_level >= LOG_LEVEL_VERBOSE) {
                 LOG(LOG_LEVEL_VERBOSE) << "Trying codecs in this order:\n";
-                for (auto it = ret.begin(); it != ret.end(); ++it) {
-                        LOG(LOG_LEVEL_VERBOSE) << "\t" << get_codec_name((*it).second) << ", internal: " << get_pixdesc_desc((*it).first) << "\n";
+                for (auto& [pixfmt, codec] : ret) {
+                        LOG(LOG_LEVEL_VERBOSE) << "\t" << get_codec_name(codec) << ", internal: " << get_pixdesc_desc(pixfmt) << "\n";
                 }
         }
 
@@ -1145,10 +1142,10 @@ after_linedecoder_lookup:
                 vector<pair<struct pixfmt_desc, codec_t>> formats_to_try; // comp_int_prop (may be empty), display_fmt
                 formats_to_try = video_decoder_order_output_codecs(comp_int_prop, decoder->native_codecs);
 
-                for (auto it = formats_to_try.begin(); it != formats_to_try.end(); ++it) {
-                        out_codec = (*it).second;
-                        if (decompress_init_multi(desc.color_spec, (*it).first,
-                                                (*it).second,
+                for (auto& [pixfmt, codec] : formats_to_try) {
+                        out_codec = codec;
+                        if (decompress_init_multi(desc.color_spec, pixfmt,
+                                                codec,
                                                 decoder->decompress_state.data(),
                                                 decoder->decompress_state.size())) {
                                 decoder->decoder_type = EXTERNAL_DECODER;
@@ -1502,13 +1499,13 @@ static void check_for_mode_change(struct state_video_decoder *decoder,
                                       PARAM_TILE_COUNT)) {
                 return;
         }
-        char desc[STR_LEN];
-        MSG(NOTICE, "New incoming video format detected: %s\n",
-            video_desc_to_string(network_desc, sizeof desc, desc));
+        char desc[256] = "";
+        video_desc_to_string(network_desc, sizeof(desc), desc);
+        MSG(NOTICE, "New incoming video format detected: %s\n", desc);
 
-        char report[STR_LEN];
-        snprintf_ch(report, "new incoming video fmt: %s", desc);
-        control_report_stats(decoder->control, report);
+        std::string report = "new incoming video fmt: ";
+        report += desc;
+        control_report_stats(decoder->control, report.c_str());
 
         reconfigure_helper(decoder, network_desc, {});
 }
@@ -1858,11 +1855,11 @@ next_packet:
                 fec_msg->received_pkts_cum = stats->received_pkts_cum;
                 fec_msg->expected_pkts_cum = stats->expected_pkts_cum;
 
-                auto t0 = std::chrono::high_resolution_clock::now();
+                auto t0 = steady_clock::now();
                 decoder->fec_queue.push(std::move(fec_msg));
-                auto t1 = std::chrono::high_resolution_clock::now();
-                double tpf = 1.0 / decoder->display_desc.fps;
-                if (std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count() > tpf && decoder->stats.displayed > 20) {
+                auto t1 = steady_clock::now();
+                auto tpf = std::chrono::duration<double>(1.0 / decoder->display_desc.fps);
+                if (t1 - t0 > tpf && decoder->stats.displayed > 20) {
                         decoder->slow_msg.print("Your computer may be too SLOW to play this !!!\n");
                 }
 
