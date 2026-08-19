@@ -1,6 +1,6 @@
 # UltraGrid R12L Streaming Handoff
 
-Last updated: 2026-08-17 (America/Los_Angeles)
+Last updated: 2026-08-18 (America/Los_Angeles)
 
 ## 2026-08-17 CESNET upstream catchup checkpoint
 
@@ -780,3 +780,40 @@ both `decoder-drop-policy=blocking` and `low-latency-video`. The saved
 receiver06 production configuration was deliberately not edited during this
 test, and `colorconnect-receiver.service` was returned to its prior inactive
 state after the manual soak. Encoder04 remains active on the merged build.
+
+### Latency-control conclusions
+
+- A fresh search of CESNET `master` at `69dbe5851` found no upstream video
+  parameter equivalent to ColorConnect's `--param low-latency-video`.
+  Upstream unconditionally sets the RTP video playout buffer to one frame
+  (`1/fps`) after an incoming-format change.
+- The similarly named upstream controls are not substitutes:
+  `low-latency-audio[=ultra]` changes only audio buffering; DeckLink
+  `:low-latency` changes DeckLink submission mode; and `--audio-delay` can add
+  delay to audio or video but cannot subtract the default video frame.
+- Keep the custom `low-latency-video` implementation temporarily because the
+  Cage/Vulkan kiosk launcher still uses it. Do not use it on DeckLink
+  receivers. A/B test Cage/Vulkan with and without it; remove the custom code
+  and documentation if it provides no material benefit there. A generic
+  upstream `video-playout-delay=<milliseconds|frames>` option would be the
+  preferred long-term replacement.
+- DeckLink `:low-latency` is already UltraGrid's implicit default. It submits
+  video immediately with `DisplayVideoFrameSync()` and writes continuous
+  audio with `WriteAudioSamplesSync()`, without an UltraGrid scheduled-frame
+  queue. Explicitly specifying it is redundant and prints a warning.
+- DeckLink `:synchronized=N` disables that immediate path and uses
+  timestamped audio plus `ScheduleVideoFrame()` with a minimum `N`-frame
+  queue. Do not combine `:low-latency` with `:synchronized`. The separately
+  configured Blackmagic `bmdDeckLinkConfigLowLatencyVideoOutput` hardware flag
+  remains enabled by default even in UltraGrid's synchronized mode.
+- The validated DeckLink receiver setting remains
+  `decklink:single-link:synchronized=2` with normal RTP playout delay.
+
+### Repository closeout
+
+- The validated catch-up was merged into the fork's default branch `master`
+  and pushed as merge commit `2e21c0f28`. There is no fork `main` branch in
+  this checkout.
+- Local `master` matched `instinctual/master` at closeout. The only worktree
+  dirt was pre-existing untracked content inside `ext-deps/libmpegts`; it was
+  not modified or committed.
