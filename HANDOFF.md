@@ -817,3 +817,48 @@ state after the manual soak. Encoder04 remains active on the merged build.
 - Local `master` matched `instinctual/master` at closeout. The only worktree
   dirt was pre-existing untracked content inside `ext-deps/libmpegts`; it was
   not modified or committed.
+
+## 2026-08-18 receiver06 scheduled-buffer startup anomaly
+
+- After a full ColorConnect update of encoder04 and receiver06, receiver06 ran
+  UltraGrid `master rev 3112f8e5` with the validated
+  `decklink:single-link:synchronized=2` command. The UltraGrid executable is
+  code-identical to the earlier `e5c5d5568` soak candidate; the commits after
+  that candidate changed only documentation. ColorConnect commit `796ee10`
+  did change the deployed Pro receiver sample from `synchronized=3` to
+  `synchronized=2` and removed `decoder-drop-policy=blocking` and
+  `low-latency-video`.
+- On the first service start, UltraGrid was already running while the SRT
+  receiver spent about 49 seconds connecting. When video joined, the
+  UltraStudio 4K Mini front panel showed `1fr Buffer`. UltraGrid then logged
+  continuing `Dismissed frame, buffered: 4` events, and the user saw matching
+  occasional visual stutters. The decoder drop count remained fixed after
+  startup, QSV decode stayed around 9-10 ms against a 27.50 ms budget, RTP
+  windows were complete, and there were no GPU hangs or decode errors. SRT
+  recovered some packet gaps without continuing drops, so decoder overload or
+  unrecovered network loss did not explain the stutters.
+- A restart with `synchronized=3` made the front panel show three buffered
+  frames. It produced one startup dismissal and one startup audio underflow,
+  then held 24 fps with no continuing dismissals or missing frames.
+- The user then restored `synchronized=2` and restarted only UltraGrid while
+  the SRT input was already established. The front panel correctly showed two
+  buffered frames. During the observed interval, the only dismissal and audio
+  underflow were startup events; missing frames remained zero, output held
+  24 fps, QSV decode measured 8.58-9.70 ms, all RTP windows were complete, and
+  all 6,200 reported audio frames were played.
+- Current evidence therefore points to an abnormal cold-start/SRT-join
+  scheduling state, not proof that `synchronized=2` is inherently unstable.
+  Keep `synchronized=2` for now. Reproduce by rebooting receiver06 or starting
+  both SRT and UltraGrid from cold, and compare the front-panel depth with
+  continuing dismissed/missing/repeated counters. If the one-frame state
+  recurs, harden scheduled-playback initialization rather than permanently
+  increasing latency.
+- DeckLink synchronized bounds use a comma:
+  `synchronized=min,max`. Plain `synchronized=2` means a 2-4 frame window;
+  `synchronized=2,3` narrows it to 2-3 and is not additional burst protection.
+  The code already calls `IDeckLinkOutput::GetBufferedVideoFrameCount()` on
+  every scheduled callback. `--verbose=debug` exposes
+  `ScheduleNextFrame - N frames buffered` but is too noisy for production.
+  A future diagnostic can report compact five-second current/min/max buffer
+  depth and warn when it remains below the configured minimum or pinned at the
+  maximum.
