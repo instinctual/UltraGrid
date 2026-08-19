@@ -31,8 +31,10 @@ fi
 set -e
 
 if [ -n "${GITHUB_TOKEN-}" ]; then
+        echo "Using GITHUB_TOKEN from environment variable." 1>&2
         set -- -H "Authorization: token $GITHUB_TOKEN"
 else
+        echo "No GITHUB_TOKEN was found!" 1>&2
         set --
 fi
 if [ "${file-}" ]; then

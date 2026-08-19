@@ -99,8 +99,9 @@ live555_rm_tests() {
 }
 
 download_build_live555() (
-        git clone --depth 1 https://github.com/xanview/live555/
+        git clone https://github.com/xanview/live555/
         cd live555
+        git checkout b785e62
 
         if is_win; then
                 ./genMakefiles mingw
@@ -192,8 +193,19 @@ install_openapv() (
         cmake --build openapv/build --parallel "$(nproc)"
         sudo cmake --install openapv/build
         if is_win; then
-                mv /usr/local/lib/oapv/import/liboapv.dll.a /usr/local/lib
+                mv /usr/local/lib/import/liboapv.dll.a /usr/local/lib
         fi
+)
+
+install_pyrowave() (
+        git clone --depth 1 https://github.com/Themaister/pyrowave.git
+        cd pyrowave
+        ./checkout_granite.sh
+        mkdir build
+        cd build
+        cmake -DCMAKE_INSTALL_PREFIX=/usr/local -G "Unix Makefiles" ..
+        make -j "$(nproc)"
+        sudo make install
 )
 
 install_pcp() {
@@ -223,6 +235,10 @@ if ! is_arm && ! is_win; then
 fi
 if ! is_win; then
         install_items="$install_items omt"
+fi
+
+if [ ! "$(uname -s)" = Darwin ]; then
+        install_items="$install_items pyrowave"
 fi
 
 if [ $# -eq 1 ] && { [ "$1" = -h ] || [ "$1" = --help ] || [ "$1" = help ]; }; then

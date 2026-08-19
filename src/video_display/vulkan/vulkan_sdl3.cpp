@@ -274,14 +274,10 @@ constexpr bool display_vulkan_process_key(state_vulkan_sdl3& s, int64_t key) {
                         log_msg(LOG_LEVEL_INFO, "Deinterlacing: %s\n",
                                 s.deinterlace ? "ON" : "OFF");
                         return true;
-                case 'f': {
+                case 'f':
                         s.fullscreen = !s.fullscreen;
-                        float mouse_x = 0, mouse_y = 0;
-                        SDL_GetGlobalMouseState(&mouse_x, &mouse_y);
                         SDL_CHECK(SDL_SetWindowFullscreen(s.window, s.fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
-                        SDL_CHECK(SDL_WarpMouseGlobal(mouse_x, mouse_y));
                         return true;
-                }
                 case 'q':
                         exit_uv(0);
                         return true;
@@ -1239,7 +1235,7 @@ bool display_vulkan_get_property(void* state, int property, void* val, size_t* l
 }
 
 void display_vulkan_new_message(module* mod) {
-        auto s = reinterpret_cast<state_vulkan_sdl3*>(mod->priv_data);
+        auto s = static_cast<state_vulkan_sdl3*>(mod->priv_data);
         assert(s->magic == magic_vulkan_sdl3);
 
         SDL_Event event{};

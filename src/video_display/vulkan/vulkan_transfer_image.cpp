@@ -359,7 +359,7 @@ void TransferImageImpl::recreate(VulkanContext& context, ImageDescription descri
                 if (void_ptr == nullptr) {
                         throw VulkanError{"Image memory cannot be mapped."};
                 }
-                ptr = reinterpret_cast<unsigned char*>(void_ptr);
+                ptr = static_cast<unsigned char *>(void_ptr);
         }
 
         vk::ImageSubresource subresource{ vk::ImageAspectFlagBits::eColor, 0, 0 };
