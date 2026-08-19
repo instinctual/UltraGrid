@@ -719,3 +719,64 @@ above where they conflict.
 - Do not replace proper decoder recovery with an external UltraGrid watcher,
   process exit, or permanently high SRT latency. The QSV forced-IDR and
   discontinuity-handling work is the intended in-process recovery mechanism.
+
+## 2026-08-18 upstream catch-up and paired validation
+
+- Branch `catchup` merged CESNET `master` through upstream commit
+  `69dbe5851`. The merge commit is `e5c5d5568`. Seven upstream commits were
+  included: the RTP Reed-Solomon data-deleter leak fix, the Windows Tracy
+  linker fix, Vulkan cast cleanups, and CineForm/JPEG XS namespace/style
+  cleanups.
+- The only merge conflict was in
+  `src/video_display/vulkan/vulkan_transfer_image.cpp`. The resolution retains
+  ColorConnect's external-host-memory fast path and fallback while applying
+  upstream's `static_cast` cleanup in the mapped-memory fallback.
+- The merged tree builds successfully. `make check` passes the functional
+  codec/recovery tests; the three UDP multicast tests continue to report the
+  known missing multicast-loopback-route failures on this build host.
+- Encoder04 (`10.55.118.88`) and receiver06 (`10.55.118.103`) both ran the
+  clean build identifying itself as `catchup rev e5c5d5568`.
+
+### Live encoder/receiver soak
+
+- Encoder04 remained on its normal production command: DeckLink R12L capture,
+  QSV HEVC 10-bit 4:4:4 identity encoding at 60 Mb/s, vertical cyclic
+  intra-refresh, and eight-channel embedded audio encoded as Opus.
+- After the startup format detection, DeckLink capture held 24.0001 fps on
+  average (23.9577-24.0356 fps across the sampled windows). QSV encode-path
+  time averaged 16.59 ms (14.53-17.04 ms) against a 41.67 ms frame budget.
+  No encoder errors, GPU hangs, capture loss, or continuing audio warnings
+  occurred. The three `Audio frame too small!` messages were confined to the
+  first second after service startup.
+- Receiver06 completed a five-minute manual soak with this candidate command,
+  without changing its saved production configuration:
+
+  ```text
+  /usr/local/bin/uv -V -d decklink:single-link:synchronized=2 \
+    -r embedded -P 50000 \
+    --param bmd-r10k-full-range,decoder-use-codec=R10k,force-lavd-decoder=hevc_qsv
+  ```
+
+- The receiver selected the direct QSV/VA DMA-BUF Vulkan Y410-to-R10k path
+  and eliminated the CPU frame copy. QSV decode averaged 9.22 ms
+  (8.66-9.66 ms) against the 27.50 ms budget.
+- Receiver totals were 7,200 video frames: 7,170 displayed, 30 startup/join
+  drops while waiting for synchronization, one startup corrupt input, and
+  zero missing frames. DeckLink ended with zero late, dropped, flushed, or
+  repeated frames; zero scheduling failures; and one startup-only dismissal
+  plus one startup-only audio underflow. Neither startup counter increased.
+- UltraGrid received 1,680,128/1,680,128 video RTP packets and
+  472,576/472,576 audio RTP packets (100% for both). SRT performed some
+  successful retransmission underneath UltraGrid, but its drop counters did
+  not increase during the soak. All 59,982 decoded audio frames were played.
+- The known QSV/VA cleanup-order warning (`Failed to destroy surface ...
+  invalid VADisplay`) appeared only when the timed test shut down. It did not
+  occur during playback and did not affect the soak result.
+
+### Resulting DeckLink receiver recommendation
+
+Use `synchronized=2`, retain the normal one-frame RTP playout delay, and omit
+both `decoder-drop-policy=blocking` and `low-latency-video`. The saved
+receiver06 production configuration was deliberately not edited during this
+test, and `colorconnect-receiver.service` was returned to its prior inactive
+state after the manual soak. Encoder04 remains active on the merged build.
