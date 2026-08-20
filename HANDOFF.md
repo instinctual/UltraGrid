@@ -896,3 +896,22 @@ state after the manual soak. Encoder04 remains active on the merged build.
   `Broadcast RGB=Full`, selects strict XR30/XB30 scanout, produces picture and
   unity-gain HDMI audio, and has no new kiosk restarts. Runtime unplug/replug
   handling is separate from this boot-without-display fix.
+
+### Repository and deployment closeout
+
+- The UltraGrid implementation and its initial handoff entry are committed on
+  `master` as `4e537ecd1` (`Wait for DRM output before starting Cage kiosk`)
+  and pushed to `instinctual/master`.
+- The matching ColorConnect deployment change is committed on `main` as
+  `34280fc` (`Wait for display before starting receiver kiosk`) and pushed to
+  `origin/main` in `/home/administrator/colorconnect2`.
+- Receiver11 has both pieces installed: the new
+  `/usr/local/sbin/ug-drm-connector-config` helper and the updated templated
+  kiosk unit. At handoff it is intentionally waiting in `ExecStartPre` for a
+  real connected display rather than repeatedly failing and restarting.
+- Do not treat the remaining worktree entries as unfinished kiosk work. The
+  UltraGrid checkout has pre-existing dirt inside the `ext-deps/libmpegts`
+  submodule. ColorConnect has pre-existing untracked
+  `common/install_modules/UltraGrid/` content and four
+  `common/install_modules/telegraf/influxdata-archive.key*` files. They were
+  deliberately left untouched and uncommitted.
