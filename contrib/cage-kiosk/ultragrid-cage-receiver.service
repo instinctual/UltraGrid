@@ -19,11 +19,12 @@ TTYVTDisallocate=yes
 UtmpIdentifier=tty1
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=WLR_BACKENDS=drm,libinput
-ExecStartPre=/usr/local/bin/ug-drm-connector-config
+ExecStartPre=/usr/local/bin/ug-drm-connector-config --wait
 ExecStart=/usr/local/bin/cage-ultragrid-10bit -D -d -m last -- /usr/local/libexec/ultragrid-cage-client
 Restart=always
 RestartSec=2
 KillSignal=SIGINT
+TimeoutStartSec=infinity
 TimeoutStopSec=15
 
 [Install]

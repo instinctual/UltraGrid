@@ -862,3 +862,37 @@ state after the manual soak. Encoder04 remains active on the merged build.
   A future diagnostic can report compact five-second current/min/max buffer
   depth and warn when it remains below the configured minimum or pinned at the
   maximum.
+
+## 2026-08-20 receiver11 display-absent kiosk startup
+
+- ReceiverLite `receiver11` is reachable at `172.25.5.11`. Its kiosk failed
+  before Cage/UltraGrid because both i915 DRM connectors reported disconnected
+  and `ug-drm-connector-config` returned `No matching connected DRM output
+  found`. The GPU, i915 driver, `/dev/dri/card1`, render node, and kiosk-user
+  group permissions were correct. SRT ingest remained active. The old
+  `Restart=always` behavior retried the failed pre-start every two seconds and
+  accumulated more than 600 restarts.
+- `drm_connector_config` now accepts `--wait`. With no matching connected
+  output it emits one waiting message and polls once per second until DRM
+  exposes exactly one connected connector with at least one advertised mode.
+  It then retains the existing behavior: set and verify `Broadcast RGB=Full`
+  before allowing Cage to start. Immediate failure remains the default when
+  `--wait` is omitted.
+- The strict Cage kiosk unit now calls the helper with `--wait` and sets
+  `TimeoutStartSec=infinity`. This deliberately leaves the kiosk in
+  `activating (start-pre)` while no sink is present; the independent SRT
+  service continues receiving. It does not use a fake EDID or headless output,
+  so the strict 10-bit, Full-range, and EDID mode-selection guarantees remain
+  intact.
+- The updated helper and templated ColorConnect kiosk unit were installed on
+  receiver11. No-display validation passed across a controlled service
+  restart: one wait helper remained active, `NRestarts=0`, HDMI remained
+  disconnected, and `colorconnect-srtreceiver.service` remained active.
+  Local tests also passed a warning-free `-Wall -Wextra -Werror` build,
+  immediate no-output failure, and bounded wait behavior with exactly one wait
+  message.
+- Still required: physically power/connect the HDMI sink and confirm the
+  already-waiting unit advances automatically into Cage and UltraGrid, sets
+  `Broadcast RGB=Full`, selects strict XR30/XB30 scanout, produces picture and
+  unity-gain HDMI audio, and has no new kiosk restarts. Runtime unplug/replug
+  handling is separate from this boot-without-display fix.

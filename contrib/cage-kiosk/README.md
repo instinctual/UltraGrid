@@ -148,6 +148,14 @@ UltraGrid and Cage exit successfully, and systemd starts a fresh kiosk session
 after two seconds. `Restart=on-failure` is insufficient because a `q` exit is
 reported as successful.
 
+The connector helper runs with `--wait`, and the unit disables its startup
+timeout. If the kiosk boots before an HDMI/DisplayPort sink is connected or
+powered, the SRT service can continue receiving while this unit waits quietly
+in `activating (start-pre)`. Once DRM reports exactly one connected output with
+an advertised mode, the helper sets and verifies Full range before Cage and
+UltraGrid start. This avoids a service restart loop and does not invent a fake
+EDID or weaken the strict 10-bit output requirements.
+
 ## Verify 10-bit and Full range
 
 ```bash

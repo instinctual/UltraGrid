@@ -7,7 +7,10 @@ DRM connector configuration
 `drm_connector_config` sets a named enum property on a connected DRM output
 and verifies the result. By default it requires exactly one connected output
 and sets `Broadcast RGB=Full`. Use `--device` and `--connector` to select an
-output explicitly on multi-output systems.
+output explicitly on multi-output systems. `--wait` waits indefinitely for a
+connected output with an advertised mode instead of failing. This is intended
+for kiosk service startup before an HDMI/DisplayPort sink is powered or
+connected.
 
 Astat
 -----

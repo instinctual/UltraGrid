@@ -13,6 +13,7 @@
 #include <xf86drmMode.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
@@ -20,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -74,6 +76,7 @@ struct Options {
         std::string property = "Broadcast RGB";
         std::string value = "Full";
         bool verify_only = false;
+        bool wait = false;
 };
 
 void usage(const char *name)
@@ -81,9 +84,10 @@ void usage(const char *name)
         std::cerr
             << "Usage: " << name
             << " [--device /dev/dri/cardN] [--connector NAME]\n"
-               "       [--property NAME] [--value ENUM] [--verify-only]\n\n"
+               "       [--property NAME] [--value ENUM] [--verify-only] "
+               "[--wait]\n\n"
                "With no device or connector, exactly one connected DRM output "
-               "must exist.\n";
+               "must exist. --wait waits indefinitely for one to appear.\n";
 }
 
 std::optional<Options> parse_options(int argc, char **argv)
@@ -110,6 +114,8 @@ std::optional<Options> parse_options(int argc, char **argv)
                         if (!read_value(result.value)) return std::nullopt;
                 } else if (arg == "--verify-only") {
                         result.verify_only = true;
+                } else if (arg == "--wait") {
+                        result.wait = true;
                 } else if (arg == "--help" || arg == "-h") {
                         usage(argv[0]);
                         std::exit(0);
@@ -289,6 +295,13 @@ int main(int argc, char **argv)
                 return 2;
         }
         auto outputs = find_connected_outputs(*options);
+        if (outputs.empty() && options->wait) {
+                std::cerr << "Waiting for a connected DRM output...\n";
+                do {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        outputs = find_connected_outputs(*options);
+                } while (outputs.empty());
+        }
         if (outputs.empty()) {
                 std::cerr << "No matching connected DRM output found\n";
                 return 1;
